@@ -1,6 +1,6 @@
 use super::{ConvertStrategy, MetDataStrategy};
 use crate::format::PkmFormat;
-use crate::location::{Location, MetData};
+use crate::location::{Location, MetData, PAL_PARK_GEN_4};
 use crate::ohpkm::OhpkmV2;
 
 use pkm_rs_resources::lookup;
@@ -26,7 +26,11 @@ impl PkmConverter {
     }
 
     pub fn nickname(&self, ohpkm: &OhpkmV2) -> String {
-        if !ohpkm.nickname_matches_species() {
+        // Gen 3/4 default names are stored ALL CAPS; nickname_matches_species is case-sensitive.
+        // Treat ignore-case species match as default name so Gen 5+ formats get proper casing.
+        let is_default_species_name = ohpkm.nickname_matches_species()
+            || ohpkm.nickname_matches_species_ignore_case();
+        if !is_default_species_name {
             return ohpkm.get_nickname().to_owned();
         }
 
@@ -164,5 +168,6 @@ const DP_FARAWAY_PLACE: u16 = 0xbba;
 
 #[cfg(feature = "wasm")]
 const fn valid_dp_location_index(location_index: u16) -> bool {
-    location_index >= 0x70 && location_index < 2000
+    // Pal Park is index 55 in D/P — below the 0x70 lower bound used for most routes but valid for PKHeX legality.
+    location_index == PAL_PARK_GEN_4 || (location_index >= 0x70 && location_index < 2000)
 }

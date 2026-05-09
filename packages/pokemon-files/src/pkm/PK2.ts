@@ -11,6 +11,7 @@ import { NationalDex } from '@pokemon-resources/consts/NationalDex'
 import { OHPKM } from '../../../../src/core/pkm/OHPKM'
 import { PkmConverter } from '../conversion/converter'
 import * as byteLogic from '../util/byteLogic'
+import { gen12TrainerNameForEncode } from '../util/gen12TrainerNameEncode'
 import { FourMoves } from '../util/pkmInterface'
 import { getLevelGen12, getStats } from '../util/statCalc'
 import * as stringLogic from '../util/stringConversion'
@@ -125,7 +126,10 @@ export default class PK2 {
       this.gameOfOrigin = other.gameOfOrigin
       this.language = other.language
       this.dexNum = other.dexNum
-      this.heldItemIndexGen2 = ItemGen2.fromModern(other.heldItemIndex)
+      this.heldItemIndexGen2 =
+        OriginGames.generation(other.gameOfOrigin) === Generation.G1
+          ? undefined
+          : ItemGen2.fromModern(other.heldItemIndex)
 
       const moveFilter = MoveFilter.fromPkmClass(PK2)
       this.moves = moveFilter.moves(other)
@@ -165,7 +169,7 @@ export default class PK2 {
       this.metLocationIndex = metData.locationIndex
       this.statusCondition = 0
       this.currentHP = other.currentHP ?? 0
-      this.trainerName = other.trainerName
+      this.trainerName = gen12TrainerNameForEncode(other.trainerName)
       this.nickname = converter.nickname(other)
       this.trainerGender = other.trainerGender
       this.level = getLevelGen12(this.dexNum, this.exp)

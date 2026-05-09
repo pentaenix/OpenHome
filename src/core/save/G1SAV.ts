@@ -1,5 +1,10 @@
 import { bytesToUint16BigEndian, get8BitChecksum } from '@openhome-core/save/util/byteLogic'
 import { gen12StringToUTF, utf16StringToGen12 } from '@openhome-core/save/util/Strings'
+import {
+  rememberedGen12BoxStringBytesForWrite,
+  rememberGen12BoxStringBytes,
+} from '@openhome-core/save/util/gen12BoxStringBytes'
+import { gen12BoxNicknameForEncode } from '@openhome-core/save/util/gen12BoxNicknameEncode'
 import { Option, range, unique } from '@openhome-core/util/functional'
 import {
   ConvertStrategy,
@@ -107,48 +112,83 @@ export class G1SAV extends OfficialSAV<PK1> {
 
     range(this.NUM_BOXES).forEach((boxNumber) => {
       this.boxes[boxNumber] = new Box(`Box ${boxNumber + 1}`, pokemonPerBox)
-      let boxByteOffset
-
-      if (boxNumber < 6) {
-        boxByteOffset = 0x4000 + boxNumber * this.BOX_SIZE
-      } else {
-        boxByteOffset = 0x6000 + (boxNumber - 6) * this.BOX_SIZE
-      }
-      for (let monIndex = 0; monIndex < pokemonPerBox; monIndex++) {
-        if (this.bytes[boxByteOffset + this.BOX_PKM_OFFSET + monIndex * this.BOX_PKM_SIZE]) {
-          try {
-            const mon = PK1.fromBytes(
-              this.bytes.slice(
-                boxByteOffset + this.BOX_PKM_OFFSET + monIndex * this.BOX_PKM_SIZE,
-                boxByteOffset + this.BOX_PKM_OFFSET + (monIndex + 1) * this.BOX_PKM_SIZE
-              ).buffer
-            )
-
-            mon.trainerName = gen12StringToUTF(
-              this.bytes,
-              boxByteOffset + this.BOX_OT_OFFSET + monIndex * 11,
-              11
-            )
-            mon.nickname = gen12StringToUTF(
-              this.bytes,
-              boxByteOffset + this.BOX_NICKNAME_OFFSET + monIndex * 11,
-              11
-            )
-            mon.gameOfOrigin = this.origin
-            mon.language = Language.English
-            this.boxes[boxNumber].boxSlots[monIndex] = mon
-          } catch (e) {
-            console.error(`G1SAV: ${e}`)
-          }
-        }
-      }
+      this.decodeG1Box(boxNumber)
     })
   }
   sid?: number | undefined
 
+  /** Rebuild `boxSlots` for one box from `this.bytes` (fixed 20-slot PC layout). */
+  private decodeG1Box(boxNumber: number): void {
+    const pokemonPerBox = this.boxRows * this.boxColumns
+    const box = this.boxes[boxNumber]
+    let boxByteOffset: number
+
+    if (boxNumber < 6) {
+      boxByteOffset = 0x4000 + boxNumber * this.BOX_SIZE
+    } else {
+      boxByteOffset = 0x6000 + (boxNumber - 6) * this.BOX_SIZE
+    }
+
+    for (let i = 0; i < pokemonPerBox; i += 1) {
+      box.boxSlots[i] = undefined
+    }
+
+    for (let monIndex = 0; monIndex < pokemonPerBox; monIndex++) {
+      const speciesByte = this.bytes[boxByteOffset + this.BOX_PKM_OFFSET + monIndex * this.BOX_PKM_SIZE]
+      // Gen 1 PC padding often uses 0x00 or 0xff; both are invalid deposited species.
+      if (speciesByte && speciesByte !== 0xff) {
+        try {
+          const mon = PK1.fromBytes(
+            this.bytes.slice(
+              boxByteOffset + this.BOX_PKM_OFFSET + monIndex * this.BOX_PKM_SIZE,
+              boxByteOffset + this.BOX_PKM_OFFSET + (monIndex + 1) * this.BOX_PKM_SIZE
+            ).buffer
+          )
+
+          const trainerNameBytes = this.bytes.slice(
+            boxByteOffset + this.BOX_OT_OFFSET + monIndex * 11,
+            boxByteOffset + this.BOX_OT_OFFSET + (monIndex + 1) * 11
+          )
+          const nicknameBytes = this.bytes.slice(
+            boxByteOffset + this.BOX_NICKNAME_OFFSET + monIndex * 11,
+            boxByteOffset + this.BOX_NICKNAME_OFFSET + (monIndex + 1) * 11
+          )
+          mon.trainerName = gen12StringToUTF(trainerNameBytes, 0, 11)
+          mon.nickname = gen12StringToUTF(nicknameBytes, 0, 11)
+          rememberGen12BoxStringBytes(mon, trainerNameBytes, nicknameBytes)
+          mon.gameOfOrigin = this.origin
+          mon.language = Language.English
+          mon.recomputeStructTypesFromPersonalTable()
+          box.boxSlots[monIndex] = mon
+        } catch (e) {
+          console.error(`G1SAV: ${e}`)
+        }
+      }
+    }
+  }
+
+  /**
+   * Ensures the recorded count byte matches non-empty slots after a write+decode (catches layout bugs).
+   */
+  private assertG1BoxCountConsistent(boxNumber: number): void {
+    let boxByteOffset: number
+    if (boxNumber < 6) {
+      boxByteOffset = 0x4000 + boxNumber * this.BOX_SIZE
+    } else {
+      boxByteOffset = 0x6000 + (boxNumber - 6) * this.BOX_SIZE
+    }
+    const recorded = this.bytes[boxByteOffset]
+    const box = this.boxes[boxNumber]
+    const actual = box.boxSlots.reduce<number>((n, s) => n + (s ? 1 : 0), 0)
+    if (recorded !== actual) {
+      console.warn(
+        `G1SAV: box ${boxNumber} count mismatch after save (bytes=${recorded}, slots=${actual}); save layout may be wrong.`
+      )
+    }
+  }
+
   prepareForSaving() {
     const changedBoxes: number[] = unique(this.updatedBoxSlots.map((coords) => coords.box))
-    const pokemonPerBox = this.boxRows * this.boxColumns
 
     changedBoxes.forEach((boxNumber) => {
       let boxByteOffset: number
@@ -161,49 +201,52 @@ export class G1SAV extends OfficialSAV<PK1> {
       const box = this.boxes[boxNumber]
       let numMons = 0
 
-      box.boxSlots.forEach((boxMon) => {
+      const pokemonPerBox = this.boxRows * this.boxColumns
+      const packed = box.boxSlots.filter((m): m is PK1 => m !== undefined && m !== null)
+      for (let i = 0; i < pokemonPerBox; i += 1) {
+        box.boxSlots[i] = packed[i]
+      }
+
+      // Gen 1 boxes are a contiguous list in hardware: Pokémon sit in slots 0..count-1.
+      // We pack edited boxes only at save time (not during in-memory UI moves in the transfer screen).
+      box.boxSlots.forEach((boxMon, monIndex) => {
         if (boxMon) {
-          // set the mon's dex number in the box
-          this.bytes[boxByteOffset + 1 + numMons] = conversion.toGen1PokemonIndex(boxMon.dexNum)
-          // set the mon's data in the box
+          numMons++
+          this.bytes[boxByteOffset + 1 + monIndex] = conversion.toGen1PokemonIndex(boxMon.dexNum)
           this.bytes.set(
             new Uint8Array(boxMon.toBytes()),
-            boxByteOffset + this.BOX_PKM_OFFSET + numMons * this.BOX_PKM_SIZE
+            boxByteOffset + this.BOX_PKM_OFFSET + monIndex * this.BOX_PKM_SIZE
           )
-          // set the mon's OT name in the box
-          const trainerNameBuffer = utf16StringToGen12(boxMon.trainerName, 11, true)
+          const trainerNameBuffer =
+            rememberedGen12BoxStringBytesForWrite(boxMon, 'trainerName', boxMon.trainerName, 11) ??
+            utf16StringToGen12(boxMon.trainerName, 11, true)
 
-          this.bytes.set(trainerNameBuffer, boxByteOffset + this.BOX_OT_OFFSET + numMons * 11)
-          // set the mon's nickname in the box
-          const nicknameBuffer = utf16StringToGen12(boxMon.nickname, 11, true)
+          this.bytes.set(trainerNameBuffer, boxByteOffset + this.BOX_OT_OFFSET + monIndex * 11)
+          const nicknameText = gen12BoxNicknameForEncode(
+            boxMon.dexNum,
+            boxMon.language,
+            boxMon.nickname
+          )
+          const nicknameBuffer =
+            rememberedGen12BoxStringBytesForWrite(boxMon, 'nickname', boxMon.nickname, 11) ??
+            utf16StringToGen12(nicknameText, 11, true).fill(0x50, nicknameText.length)
 
-          this.bytes.set(nicknameBuffer, boxByteOffset + this.BOX_NICKNAME_OFFSET + numMons * 11)
-          numMons++
+          this.bytes.set(nicknameBuffer, boxByteOffset + this.BOX_NICKNAME_OFFSET + monIndex * 11)
+        } else {
+          this.bytes[boxByteOffset + 1 + monIndex] = 0xff
+          this.bytes.set(
+            new Uint8Array(this.BOX_PKM_SIZE).fill(0),
+            boxByteOffset + this.BOX_PKM_OFFSET + monIndex * this.BOX_PKM_SIZE
+          )
+          this.bytes.set(new Uint8Array(11).fill(0), boxByteOffset + this.BOX_OT_OFFSET + monIndex * 11)
+          this.bytes.set(
+            new Uint8Array(11).fill(0),
+            boxByteOffset + this.BOX_NICKNAME_OFFSET + monIndex * 11
+          )
         }
       })
 
       this.bytes[boxByteOffset] = numMons
-      const remainingSlots = pokemonPerBox - numMons
-
-      if (remainingSlots) {
-        // set all mon data to all 0s
-        this.bytes.set(
-          new Uint8Array(this.BOX_PKM_SIZE * remainingSlots),
-          boxByteOffset + this.BOX_PKM_OFFSET + numMons * this.BOX_PKM_SIZE
-        )
-        // set all OT names to all 0s
-        this.bytes.set(
-          new Uint8Array(11 * remainingSlots),
-          boxByteOffset + this.BOX_OT_OFFSET + numMons * 11
-        )
-        // set all nicknames to all 0s
-        this.bytes.set(
-          new Uint8Array(11 * remainingSlots),
-          boxByteOffset + this.BOX_NICKNAME_OFFSET + numMons * 11
-        )
-      }
-      // set all dex numbers to 0xFF or add terminator
-      this.bytes.set(new Uint8Array(remainingSlots + 1).fill(0xff), boxByteOffset + 1 + numMons)
       let boxChecksumOffset
 
       if (boxNumber < 6) {
@@ -221,6 +264,9 @@ export class G1SAV extends OfficialSAV<PK1> {
           this.CURRENT_BOX_DATA_OFFSET
         )
       }
+
+      this.decodeG1Box(boxNumber)
+      this.assertG1BoxCountConsistent(boxNumber)
     })
     const bank2Checksum = get8BitChecksum(this.bytes, 0x4000, 0x5a4c) ^ 0xff
 

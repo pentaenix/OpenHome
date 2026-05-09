@@ -26,6 +26,7 @@ import {
   getMonFileIdentifier,
   getMonGen12Identifier,
   getMonGen345Identifier,
+  shouldReuseTrackedGen345Mon,
 } from '@openhome-core/pkm/Lookup'
 import { G8LumiSAV } from '@openhome-core/save/luminescentplatinum/G8LUMISAV'
 import { ConvertStrategy, initSync as initPkmRsWasm } from '@pkm-rs/pkg'
@@ -141,6 +142,12 @@ function intArg(name: string, fallback?: number): number {
 function boolArg(name: string, fallback: boolean): boolean {
   const raw = arg(name, String(fallback))
   return raw === '1' || raw === 'true' || raw === 'yes'
+}
+
+function optionalInt(value: unknown): number | undefined {
+  if (value === undefined || value === null) return undefined
+  const parsed = Number(value)
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : undefined
 }
 
 function pathData(raw: string): PathData {
@@ -308,6 +315,10 @@ function loadIfTracked(ctx: BridgeContext, mon: PKMInterface): OHPKM | undefined
     case 'PK3UB':
     case 'PK4':
     case 'PK5': {
+      if (!shouldReuseTrackedGen345Mon(mon)) {
+        return undefined
+      }
+
       const key = getMonGen345Identifier(mon)
       return key ? ctx.store[ctx.gen345[key]] : undefined
     }
@@ -486,6 +497,34 @@ async function commandSyncSave() {
   jsonOk({ operation: 'sync-save', syncedOpenhomeIds: synced })
 }
 
+async function commandSupportsMons() {
+  const savePath = arg('save')
+  const save = await loadSave(savePath, arg('save-type', ''))
+  const rawMons = JSON.parse(arg('mons-json', '[]')) as unknown
+  if (!Array.isArray(rawMons)) throw new Error('--mons-json must be an array')
+
+  const results = rawMons.map((item) => {
+    if (!item || typeof item !== 'object') throw new Error('--mons-json entries must be objects')
+    const obj = item as Record<string, unknown>
+    const dexNumber = optionalInt(obj.dexNumber ?? obj.dex_number)
+    const formeNumber = optionalInt(obj.formeNumber ?? obj.form_number ?? obj.form)
+    const extraFormIndex = optionalInt(obj.extraFormIndex ?? obj.extra_form_index)
+    if (dexNumber === undefined) throw new Error('mon entry missing dexNumber')
+    return {
+      dexNumber,
+      formeNumber: formeNumber ?? 0,
+      extraFormIndex: extraFormIndex ?? null,
+      supported: save.supportsMon(dexNumber, formeNumber ?? 0, extraFormIndex),
+    }
+  })
+
+  jsonOk({
+    operation: 'supports-mons',
+    saveType: (save.constructor as SAVClass).saveTypeID,
+    results,
+  })
+}
+
 async function main() {
   await initWasm()
   const command = process.argv.slice(2).find((item) => item !== '--' && !item.startsWith('--'))
@@ -502,6 +541,9 @@ async function main() {
       break
     case 'push-to-game':
       await commandPushToGame()
+      break
+    case 'supports-mons':
+      await commandSupportsMons()
       break
     default:
       throw new Error(`Unknown command ${command}`)

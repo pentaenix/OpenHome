@@ -351,6 +351,8 @@ pub enum Location {
 }
 
 pub const CANT_TELL_GEN2: u16 = 126;
+/// Gen 2 met-location index 0 — displays as "(None)" (PKHeX / `Gen2Locations`).
+pub const NONE_GEN2: u16 = 0;
 pub const FATEFUL_ENCOUNTER_GEN_3: u16 = 255;
 pub const PAL_PARK_GEN_4: u16 = 55;
 /// Gen V Unova map index for the Poké Transfer Lab building on Route 15.
@@ -803,6 +805,18 @@ mod tests {
     mod pk5 {
 
         use super::*;
+
+        #[test]
+        fn to_black_from_gold() -> Result<()> {
+            let ohpkm = ohpkm_with_origin_and_location(OriginGame::Gold, 200);
+            let met_data = PkmFormat::PK5.met_data_maximizing_legality(&ohpkm);
+
+            // Game Boy origin should stay on the original game and use the Poké Transfer met location.
+            assert_eq!(met_data.origin, OriginGame::Gold);
+            assert_eq!(met_data.location_index, POKE_TRANSFER_MET_LOCATION_GEN_5);
+
+            Ok(())
+        }
 
         #[test]
         fn to_black_from_omega_ruby() -> Result<()> {

@@ -4,11 +4,14 @@ import {
   ConvertStrategy,
   ExtraFormIndex,
   extraFormIndexFromOrasPikachu,
+  Generation,
   Item,
   Language,
   Languages,
+  Lookup,
   MetadataSummaryLookup,
   NatureIndex,
+  OriginGames,
   orasFormIndexIfSupported,
   SpeciesLookup,
 } from '@pkm-rs/pkg'
@@ -230,31 +233,38 @@ export default class PK6 {
       const converter = new PkmConverter('PK6', strategy)
       const other = arg
       const metData = converter.metData(other)
+      const isGameBoyOrigin = OriginGames.generation(other.gameOfOrigin) <= Generation.G2
+      const formNum =
+        other.extraFormIndex !== undefined
+          ? (orasFormIndexIfSupported(other.extraFormIndex) ?? 0)
+          : other.formNum
+      const abilityNum = isGameBoyOrigin ? other.abilityNumFromPidGen34() : other.abilityNum ?? 0
 
-      this.encryptionConstant = other.encryptionConstant ?? 0
+      this.encryptionConstant =
+        isGameBoyOrigin && other.personalityValue !== undefined
+          ? other.personalityValue
+          : other.encryptionConstant ?? 0
       this.dexNum = other.dexNum
       this.heldItemIndex = other.heldItemIndex
       this.trainerID = other.trainerID
       this.secretID = other.secretID
       this.exp = other.exp
-      this.ability = other.ability
-      this.abilityNum = other.abilityNum ?? 0
+      this.abilityNum = abilityNum
+      this.ability =
+        (isGameBoyOrigin
+          ? MetadataSummaryLookup(this.dexNum, formNum)?.abilityByNum(abilityNum)
+          : other.ability) ?? MetadataSummaryLookup(this.dexNum, formNum)?.abilityByNum(abilityNum)
       this.trainingBagHits = other.trainingBagHits ?? 0
       this.trainingBag = other.trainingBag ?? 0
       this.personalityValue = other.personalityValue ?? 0
       this.nature = other.nature
-
       if (other.extraFormIndex !== undefined) {
         const orasIndex = orasFormIndexIfSupported(other.extraFormIndex)
         if (orasIndex !== undefined) {
-          this.formNum = orasIndex
           this.extraFormIndex = other.extraFormIndex
-        } else {
-          this.formNum = 0
         }
-      } else {
-        this.formNum = other.formNum
       }
+      this.formNum = formNum
 
       this.gender = other.gender ?? 0
       this.evs = other.evs ?? {
@@ -299,7 +309,11 @@ export default class PK6 {
       this.secretSuperTrainingComplete = other.secretSuperTrainingComplete ?? false
       this.ivs = converter.ivs(other)
       this.isEgg = other.isEgg
-      this.isNicknamed = other.isNicknamed
+      {
+        const speciesName = Lookup.speciesName(other.dexNum, other.language)
+        this.isNicknamed =
+          this.nickname.trim() === speciesName.trim() ? false : (other.isNicknamed ?? true)
+      }
       this.handlerName = other.handlerName
       this.handlerGender = other.handlerGender
       this.isCurrentHandler = other.isCurrentHandler

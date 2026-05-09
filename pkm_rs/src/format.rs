@@ -859,14 +859,34 @@ impl PkmFormat {
     pub fn met_data_maximizing_legality(&self, ohpkm: &OhpkmV2) -> MetData {
         let source_origin = ohpkm.get_game_of_origin();
         let source_met_location = ohpkm.get_met_location_index();
-        if self.matches_origin(source_origin) {
+
+        if source_origin.is_gameboy() && self.generation() >= Generation::G5 {
+                // Gen 5+ transfer chains should preserve the original Game Boy origin and use the
+                // Poké Transfer met location. This keeps the projected file on the transfer path
+                // instead of masquerading as a native Gen 5 encounter from a later origin game.
+                return MetData::new(source_origin, super::location::POKE_TRANSFER_MET_LOCATION_GEN_5);
+        }
+
+        if self.matches_origin(source_origin)
+            && !(self.generation() >= Generation::G5 && source_origin.is_gameboy())
+        {
             // this format matches the origin game, so the met location index should be valid in the new format
             return MetData::new(source_origin, source_met_location);
         }
 
         match self {
-            PkmFormat::PK1 | PkmFormat::PK2 => {
+            PkmFormat::PK1 => {
                 MetData::new(source_origin, super::location::CANT_TELL_GEN2)
+            }
+            PkmFormat::PK2 => {
+                // Gen 1 has no met location; projecting to Gen 2 should use "(None)" (index 0), not
+                // "Can't Tell" (126). Other cross-gen hops into PK2 still use Can't Tell.
+                let location_index = if source_origin.generation() == Generation::G1 {
+                    super::location::NONE_GEN2
+                } else {
+                    super::location::CANT_TELL_GEN2
+                };
+                MetData::new(source_origin, location_index)
             }
             PkmFormat::PK3 => {
                 let legalized_origin = self.legalize_origin(source_origin);
@@ -937,6 +957,36 @@ impl PkmFormat {
             Self::PB8LUMI => MetadataSource::BrilliantDiamondShiningPearl,
             Self::PK3RR | Self::PK3UB => MetadataSource::FireRedLeafGreen,
         }
+    }
+}
+
+#[cfg(test)]
+mod met_data_gen12_tests {
+    use super::PkmFormat;
+    use crate::location;
+    use crate::ohpkm::OhpkmV2;
+    use crate::result::Result;
+    use pkm_rs_types::OriginGame;
+
+    #[test]
+    fn pk2_from_gen1_uses_none_met_location_not_cant_tell() -> Result<()> {
+        let mut ohpkm = OhpkmV2::new(25, 0)?;
+        ohpkm.set_game_of_origin(OriginGame::Red);
+        ohpkm.set_met_location_index(0);
+        let met_data = PkmFormat::PK2.met_data_maximizing_legality(&ohpkm);
+        assert_eq!(met_data.location_index, location::NONE_GEN2);
+        assert_ne!(met_data.location_index, location::CANT_TELL_GEN2);
+        Ok(())
+    }
+
+    #[test]
+    fn pk2_from_gen3_cross_format_still_uses_cant_tell() -> Result<()> {
+        let mut ohpkm = OhpkmV2::new(25, 0)?;
+        ohpkm.set_game_of_origin(OriginGame::Ruby);
+        ohpkm.set_met_location_index(10);
+        let met_data = PkmFormat::PK2.met_data_maximizing_legality(&ohpkm);
+        assert_eq!(met_data.location_index, location::CANT_TELL_GEN2);
+        Ok(())
     }
 }
 

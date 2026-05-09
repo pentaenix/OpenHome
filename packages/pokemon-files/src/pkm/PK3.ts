@@ -5,11 +5,13 @@ import {
   AbilityNumber,
   Ball,
   ConvertStrategy,
+  Generation,
   ItemGen3,
   Language,
   Languages,
   MetadataSummaryLookup,
   NatureIndex,
+  OriginGames,
   SpeciesLookup,
 } from '@pkm-rs/pkg'
 import { OHPKM } from '../../../../src/core/pkm/OHPKM'
@@ -62,6 +64,8 @@ export default class PK3 {
   abilityNum: number
   isFatefulEncounter: boolean
   statusCondition: number
+  /** Party structure byte @0x54; can disagree with EXP-derived level (Pal Park met level should follow this). */
+  statLevel?: number
   currentHP: number
   nickname: string
   trainerName: string
@@ -132,8 +136,10 @@ export default class PK3 {
       }
 
       if (dataView.byteLength >= 100) {
+        this.statLevel = dataView.getUint8(0x54)
         this.currentHP = dataView.getUint8(0x56)
       } else {
+        this.statLevel = undefined
         this.currentHP = 0
       }
 
@@ -149,7 +155,8 @@ export default class PK3 {
       const other = arg
       const metData = converter.metData(other)
 
-      this.personalityValue = generatePersonalityValuePreservingAttributes(other)
+      this.personalityValue =
+        other.personalityValue ?? generatePersonalityValuePreservingAttributes(other)
       this.trainerID = other.trainerID
       this.secretID = other.secretID
       this.language = other.language
@@ -180,19 +187,17 @@ export default class PK3 {
       this.isEgg = other.isEgg
       this.abilityNum = other.abilityNum
       if (
-        this.abilityNum === 2 &&
-        !this.metadata
-          ?.abilityByNum(AbilityNumber.Second)
-          ?.equals(this.metadata.abilityByNumGen3(AbilityNumber.Second))
+        OriginGames.generation(other.gameOfOrigin) <= Generation.G2 ||
+        (this.abilityNum !== 1 && this.abilityNum !== 2)
       ) {
-        console.log(
-          this.metadata?.abilityByNum(AbilityNumber.Second).index,
-          this.metadata?.abilityByNumGen3(AbilityNumber.Second).index
-        )
-        this.abilityNum = 1
+        // GB-origin Pokémon have no native ability slot. Gen 3 writes only ability 1/2,
+        // so normalize the projected mon to the PID-derived slot instead of carrying
+        // the GB placeholder value through.
+        this.abilityNum = this.personalityValue % 2 === 1 ? 2 : 1
       }
       this.isFatefulEncounter = other.isFatefulEncounter
       this.statusCondition = 0
+      this.statLevel = other.partyStatLevel
       this.currentHP = other.currentHP
       this.nickname = converter.nickname(other)
       this.trainerName = other.trainerName
@@ -253,10 +258,15 @@ export default class PK3 {
     }
 
     if (options?.includeExtraFields) {
+      dataView.setUint8(0x54, this.statLevel ?? this.getLevel())
+    }
+
+    if (options?.includeExtraFields) {
       dataView.setUint8(0x56, this.currentHP)
     }
 
-    stringLogic.writeGen3StringToBytes(dataView, this.nickname, 0x8, 10, false)
+    // Fill trailing nickname bytes with 0xFF so Gen 3 trash-bytes match encounter expectations.
+    stringLogic.writeGen3StringToBytes(dataView, this.nickname, 0x8, 10, true)
     stringLogic.writeGen3StringToBytes(dataView, this.trainerName, 0x14, 7, true)
     gen3ContestRibbonsToBuffer(dataView, 0x4c, 0, this.ribbons)
     byteLogic.setFlagIndexes(

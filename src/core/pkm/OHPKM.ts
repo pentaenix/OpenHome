@@ -19,7 +19,6 @@ import {
   Tag,
   TrainerData,
   TrainerMemory,
-  updatePidIfWouldBecomeShinyGen345,
 } from '@pkm-rs/pkg'
 import {
   AllPKMFields,
@@ -73,6 +72,9 @@ export class OHPKM extends OhpkmV2Wasm implements PKMInterface {
   }
   format: 'OHPKM' = 'OHPKM'
 
+  /** Gen III party level byte when known (`PK3.statLevel`); PKHeX Pal Park met level follows this over EXP-derived level. */
+  partyStatLevel?: number
+
   constructor(arg: Uint8Array | AllPKMFields) {
     if (arg instanceof Uint8Array) {
       super(arg)
@@ -90,15 +92,9 @@ export class OHPKM extends OhpkmV2Wasm implements PKMInterface {
             .concat(other.trainerID.toString())
         )
 
-        if (other.format === 'PK3' || other.format === 'PK4' || other.format === 'PK5') {
-          this.personalityValue = updatePidIfWouldBecomeShinyGen345(
-            other.personalityValue,
-            other.trainerID,
-            other.secretID
-          )
-        } else {
-          this.personalityValue = other.personalityValue
-        }
+        // Preserve source PID/PV exactly when present. Changing it during tracking breaks
+        // same-save roundtrips (e.g. Emerald -> Resort -> Emerald) and invalidates legality.
+        this.personalityValue = other.personalityValue
       } else if (other.dvs) {
         const { hp, atk, def, spc, spe } = other.dvs
 
@@ -184,6 +180,9 @@ export class OHPKM extends OhpkmV2Wasm implements PKMInterface {
 
       this.metLocationIndex = other.metLocationIndex ?? 0
       this.metLevel = other.metLevel ?? 0
+      if (other.statLevel !== undefined && other.statLevel > 0) {
+        this.partyStatLevel = other.statLevel
+      }
 
       if (other.dvs && other.evsG12) {
         this.setGameboyData(
@@ -700,6 +699,9 @@ export class OHPKM extends OhpkmV2Wasm implements PKMInterface {
 
   public syncWithGameData(other: PKMInterface, save?: SAV) {
     this.exp = other.exp
+    if (other.statLevel !== undefined && other.statLevel > 0) {
+      this.partyStatLevel = other.statLevel
+    }
 
     this.moves = other.moves as FourMoves
     this.movePP = adjustMovePPBetweenFormats(this, other)
@@ -898,6 +900,28 @@ export class OHPKM extends OhpkmV2Wasm implements PKMInterface {
     }
     if (other.obedienceLevel !== undefined) {
       this.obedienceLevel = other.obedienceLevel
+    }
+
+    // Gen I–III party data has no nickname bit; OHPKM keeps `isNicknamed` separately. Updating the string
+    // from the cartridge (above) previously left stale flags so PKHeX legality diverged after resort sync.
+    this.reconcileIsNicknamedAfterSync(other)
+  }
+
+  /**
+   * Align `isNicknamed` with nickname + source format. PK4+ supply an explicit cartridge flag; earlier
+   * formats infer from species-name comparison (same idea as Rust `MainDataEditable::fix_errors`).
+   */
+  private reconcileIsNicknamedAfterSync(other: PKMInterface) {
+    if (other.isNicknamed !== undefined) {
+      this.isNicknamed = other.isNicknamed
+      return
+    }
+    if (this.nicknameMatchesSpecies()) {
+      this.isNicknamed = false
+    } else if (this.nicknameMatchesSpeciesIgnoreCase()) {
+      this.resetNicknameToSpecies()
+    } else {
+      this.isNicknamed = true
     }
   }
 

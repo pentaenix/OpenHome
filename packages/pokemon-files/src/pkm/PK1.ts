@@ -1,24 +1,128 @@
 import {
   ConvertStrategy,
   Generation,
-  ItemGen1,
   Language,
   Lookup,
   MetadataSummaryLookup,
+  MetadataSource,
+  OriginGame,
   OriginGames,
   SpeciesLookup,
+  Tag,
+  type PkmType,
 } from '@pkm-rs/pkg'
 
 import { OHPKM } from '../../../../src/core/pkm/OHPKM'
 import * as conversion from '../conversion'
 import { PkmConverter } from '../conversion/converter'
 import * as byteLogic from '../util/byteLogic'
+import { gen1RbyCatchRateForNationalDex } from '../util/gen1RbyCatchRate'
+import { gen12TrainerNameForEncode } from '../util/gen12TrainerNameEncode'
 import { FourMoves } from '../util/pkmInterface'
 import { getLevelGen12, getStats } from '../util/statCalc'
 import * as stringLogic from '../util/stringConversion'
 import * as types from '../util/types'
 import { MoveFilter } from '../util/util'
 import { PkmConstructorOptions } from './PKM'
+
+/** Personal table for Gen 1 saves: Yellow differs from Red/Blue for some species (e.g. Pikachu line). */
+export function gen1PersonalMetadataSourceForOrigin(origin: number): MetadataSource {
+  return origin === OriginGame.Yellow ? MetadataSource.Yellow : MetadataSource.RedBlue
+}
+
+function gen1PersonalSourcesInFallbackOrder(preferred: MetadataSource): MetadataSource[] {
+  return preferred === MetadataSource.Yellow
+    ? [MetadataSource.Yellow, MetadataSource.RedBlue]
+    : [MetadataSource.RedBlue, MetadataSource.Yellow]
+}
+
+/**
+ * Inverse of Rust `PkmType::from_byte_gen12` (`pkm_rs_types`): bytes @0x05–0x06 in deposited PK1 data
+ * use Generation I/II **storage** numbering (PKHeX `personal_rb`), not a compact 0..=14 menu encoding.
+ * PKHeX legality matches these against personal data — e.g. Water=21, Grass=22, Fire=20; mono-types
+ * duplicate the same byte in both slots (e.g. Poliwhirl 21/21).
+ */
+function pkmTypeToGen12StoredStructByte(t: PkmType): number {
+  switch (t) {
+    case 'Normal':
+      return 0
+    case 'Fighting':
+      return 1
+    case 'Flying':
+      return 2
+    case 'Poison':
+      return 3
+    case 'Ground':
+      return 4
+    case 'Rock':
+      return 5
+    case 'Bug':
+      return 7
+    case 'Ghost':
+      return 8
+    case 'Fire':
+      return 20
+    case 'Water':
+      return 21
+    case 'Grass':
+      return 22
+    case 'Electric':
+      return 23
+    case 'Psychic':
+      return 24
+    case 'Ice':
+      return 25
+    case 'Dragon':
+      return 26
+    default:
+      return 0
+  }
+}
+
+/**
+ * Maps species types from PKHeX personal data into R/B/Y deposited struct type bytes @0x05–0x06.
+ */
+function gen1TypeBytesFromSpeciesMetadata(
+  dexNum: number,
+  formNum: number,
+  fallback: { type1: number; type2: number },
+  preferredPersonalSource: MetadataSource
+): { type1: number; type2: number } {
+  if (dexNum < 1) {
+    return fallback
+  }
+  const meta = MetadataSummaryLookup(dexNum, formNum)
+  if (!meta) {
+    return fallback
+  }
+  try {
+    for (const src of gen1PersonalSourcesInFallbackOrder(preferredPersonalSource)) {
+      if (!meta.hasDataForSource(src)) {
+        continue
+      }
+      const t1 = meta.type1WithSource(src) ?? meta.type1
+      const t2Raw = meta.type2WithSource(src) ?? meta.type2
+      const type1 = pkmTypeToGen12StoredStructByte(t1)
+      const type2 = t2Raw !== undefined ? pkmTypeToGen12StoredStructByte(t2Raw) : type1
+      return { type1, type2 }
+    }
+    return fallback
+  } finally {
+    meta.free()
+  }
+}
+
+function tryOriginalPk1PartyByte7(ohpkm: OHPKM): number | undefined {
+  const od = ohpkm.originalData
+  if (!od) return undefined
+  try {
+    if (od.tag !== Tag.Pk1) return undefined
+    const d = od.data
+    return d.length > 7 ? d[7] : undefined
+  } finally {
+    od.free()
+  }
+}
 
 export default class PK1 {
   static getFormat() {
@@ -36,7 +140,11 @@ export default class PK1 {
   statusCondition: number
   type1: number
   type2: number
-  heldItemIndexGen1?: ItemGen1
+  /**
+   * Gen 1 party struct byte @0x07. Native Gen 1 uses catch rate; Gen 2-origin projections reuse the
+   * Gen 2 held-item byte because PKHeX legality treats that field as the origin signal there.
+   */
+  gen1PartyStructByte7: number
   moves: FourMoves
   trainerID: number
   exp: number
@@ -50,7 +158,9 @@ export default class PK1 {
 
   constructor(arg: ArrayBuffer | OHPKM, options: PkmConstructorOptions) {
     if (arg instanceof ArrayBuffer) {
-      const buffer = new Uint8Array(arg)[2] === 0xff ? arg.slice(3) : arg
+      const u8 = new Uint8Array(arg)
+      // Gen 1 box deposit is exactly 33 bytes; only strip a 3-byte party wrapper on longer buffers.
+      const buffer = u8.byteLength !== PK1.getBoxSize() && u8[2] === 0xff ? arg.slice(3) : arg
       this.originalBytes = buffer
       const dataView = new DataView(buffer)
       this.gameOfOrigin = 0
@@ -59,9 +169,16 @@ export default class PK1 {
       this.currentHP = dataView.getUint16(0x1, false)
       this.level = dataView.getUint8(0x3)
       this.statusCondition = dataView.getUint8(0x4)
-      this.type1 = dataView.getUint8(0x5)
-      this.type2 = dataView.getUint8(0x6)
-      this.heldItemIndexGen1 = ItemGen1.fromIndex(dataView.getUint8(0x7))
+      const rawType1 = dataView.getUint8(0x5)
+      const rawType2 = dataView.getUint8(0x6)
+      // `gameOfOrigin` is set later by G1SAV; assume Red/Blue until `recomputeStructTypesFromPersonalTable()`.
+      const speciesTypes = gen1TypeBytesFromSpeciesMetadata(this.dexNum, 0, {
+        type1: rawType1,
+        type2: rawType2,
+      }, MetadataSource.RedBlue)
+      this.type1 = speciesTypes.type1
+      this.type2 = speciesTypes.type2
+      this.gen1PartyStructByte7 = dataView.getUint8(0x7)
       this.moves = [
         dataView.getUint8(0x8),
         dataView.getUint8(0x9),
@@ -110,9 +227,20 @@ export default class PK1 {
       this.currentHP = other.currentHP ?? 0
       this.level = 0
       this.statusCondition = 0
-      this.type1 = 0
-      this.type2 = 0
-      this.heldItemIndexGen1 = ItemGen1.fromModern(other.heldItemIndex)
+
+      const { type1, type2 } = gen1TypeBytesFromSpeciesMetadata(
+        this.dexNum,
+        other.formNum ?? 0,
+        { type1: 0, type2: 0 },
+        gen1PersonalMetadataSourceForOrigin(other.gameOfOrigin)
+      )
+      this.type1 = type1
+      this.type2 = type2
+
+      this.gen1PartyStructByte7 =
+        OriginGames.generation(other.gameOfOrigin) === Generation.G2
+          ? other.heldItemIndex
+          : tryOriginalPk1PartyByte7(other) ?? gen1RbyCatchRateForNationalDex(this.dexNum)
 
       const moveFilter = MoveFilter.fromPkmClass(PK1)
       this.moves = moveFilter.moves(other)
@@ -139,7 +267,7 @@ export default class PK1 {
         spc: 0,
       }
       this.dvs = other.dvs
-      this.trainerName = other.trainerName
+      this.trainerName = gen12TrainerNameForEncode(other.trainerName)
       this.nickname = converter.nickname(other)
     }
 
@@ -164,7 +292,7 @@ export default class PK1 {
     dataView.setUint8(0x4, this.statusCondition)
     dataView.setUint8(0x5, this.type1)
     dataView.setUint8(0x6, this.type2)
-    dataView.setUint8(0x7, this.heldItemIndexGen1?.index ?? 0)
+    dataView.setUint8(0x7, this.gen1PartyStructByte7)
     for (let i = 0; i < 4; i++) {
       dataView.setUint8(0x8 + i, this.moves[i])
     }
@@ -204,11 +332,11 @@ export default class PK1 {
   }
 
   public get heldItemIndex() {
-    return this.heldItemIndexGen1?.toModern()?.index ?? 0
+    return 0
   }
 
   public get heldItemName() {
-    return this.heldItemIndexGen1?.name ?? 'None'
+    return 'None'
   }
 
   public get trainerGender() {
@@ -254,5 +382,29 @@ export default class PK1 {
 
   static maxValidBall() {
     return 0
+  }
+
+  /**
+   * After `gameOfOrigin` is set (e.g. Yellow vs Red/Blue), re-encode @0x05–0x06 from the matching
+   * Gen 1 personal table (Gen12 **storage** type bytes per PKHeX `personal_rb`, not legacy 0..14).
+   */
+  recomputeStructTypesFromPersonalTable(): void {
+    let fallbackType1 = this.type1
+    let fallbackType2 = this.type2
+    if (this.originalBytes) {
+      const dv = new DataView(this.originalBytes)
+      if (dv.byteLength > 0x6) {
+        fallbackType1 = dv.getUint8(0x5)
+        fallbackType2 = dv.getUint8(0x6)
+      }
+    }
+    const t = gen1TypeBytesFromSpeciesMetadata(
+      this.dexNum,
+      0,
+      { type1: fallbackType1, type2: fallbackType2 },
+      gen1PersonalMetadataSourceForOrigin(this.gameOfOrigin)
+    )
+    this.type1 = t.type1
+    this.type2 = t.type2
   }
 }
