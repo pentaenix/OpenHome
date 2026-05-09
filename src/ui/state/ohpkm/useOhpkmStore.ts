@@ -7,6 +7,7 @@ import {
   getMonFileIdentifier,
   getMonGen12Identifier,
   getMonGen345Identifier,
+  shouldReuseTrackedGen345Mon,
   OhpkmIdentifier,
 } from '../../../core/pkm/Lookup'
 import { SAV } from '../../../core/save/interfaces'
@@ -173,6 +174,10 @@ export function useOhpkmStore(): OhpkmStore {
         case 'PK3UB':
         case 'PK4':
         case 'PK5': {
+          if (!shouldReuseTrackedGen345Mon(mon)) {
+            return undefined
+          }
+
           const gen345Identifier = getMonGen345Identifier(mon)
           if (!gen345Identifier) {
             throw Error(

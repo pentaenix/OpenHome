@@ -2,14 +2,17 @@ import { Gen4Ribbons } from '@pokemon-resources/index'
 
 import {
   AbilityIndex,
+  AbilityNumber,
   Ball,
   ConvertStrategy,
+  Generation,
   Gender,
   Item,
   Language,
   Languages,
   MetadataSummaryLookup,
   NatureIndex,
+  OriginGames,
   ShinyLeaves,
   SpeciesLookup,
 } from '@pkm-rs/pkg'
@@ -26,9 +29,11 @@ import { generatePersonalityValuePreservingAttributes, MoveFilter } from '../uti
 import { PkmConstructorOptions } from './PKM'
 
 const DP_FARAWAY_PLACE = 0xbba
+/** D/P Pal Park index — valid met/egg location but below the usual 0x0070 route range. */
+const PAL_PARK_GEN_4 = 55
 
 function validDPLocation(index: number): boolean {
-  return index >= 0x0070 && index < 2000
+  return index === PAL_PARK_GEN_4 || (index >= 0x0070 && index < 2000)
 }
 
 export default class PK4 {
@@ -192,7 +197,8 @@ export default class PK4 {
       const other = arg
       const metData = converter.metData(other)
 
-      this.personalityValue = generatePersonalityValuePreservingAttributes(other) ?? 0
+      this.personalityValue =
+        other.personalityValue ?? generatePersonalityValuePreservingAttributes(other) ?? 0
       this.dexNum = other.dexNum
       this.heldItemIndex = other.heldItemIndex
       this.trainerID = other.trainerID
@@ -239,15 +245,13 @@ export default class PK4 {
       this.formNum = other.formNum
       this.shinyLeaves = other.shinyLeaves?.clone() ?? new ShinyLeaves()
       this.gameOfOrigin = other.gameOfOrigin
-      this.eggDate = other.eggDate ?? {
-        month: new Date().getMonth(),
-        day: new Date().getDate(),
-        year: new Date().getFullYear(),
-      }
+      // Gen III has no egg receipt date; inventing one breaks PKHeX. Omit unless OHPKM supplied it.
+      this.eggDate = other.eggDate
+      const now = new Date()
       this.metDate = other.metDate ?? {
-        month: new Date().getMonth(),
-        day: new Date().getDate(),
-        year: new Date().getFullYear(),
+        month: now.getMonth() + 1,
+        day: now.getDate(),
+        year: now.getFullYear(),
       }
       this.pokerusByte = other.pokerusByte ?? 0
 
@@ -288,14 +292,38 @@ export default class PK4 {
       this.metLocationIndexPtHGSS = converter.metLocationIndexPlatinumHgss(other)
       this.metLocationIndex = metData.locationIndex
 
+      if (OriginGames.generation(other.gameOfOrigin) <= Generation.G2) {
+        this.metLocationIndex = PAL_PARK_GEN_4
+        this.encounterType = 0
+      }
+
       this.gameOfOrigin = metData.gameOfOrigin
       this.metLevel = other.metLevel
+      // Gen III Pal Park transfer (PKHeX): met level 0 from GBA becomes party level on the DS blob.
+      // Prefer PK3 party byte when present — EXP-derived level can be +1 vs cartridge display.
+      if (
+        metData.locationIndex === PAL_PARK_GEN_4 &&
+        (other.metLevel === 0 || other.metLevel === undefined)
+      ) {
+        const party = (other as OHPKM).partyStatLevel
+        const derived = this.getLevel()
+        const useParty = party !== undefined && party > 0
+        this.metLevel = Math.min(useParty ? party : derived, 127)
+      }
 
       this.ribbons = filterRibbons(other.ribbons ?? [], [Gen4Ribbons], '') ?? []
       this.nickname = converter.nickname(other)
       this.trainerName = other.trainerName
       this.trainerGender = other.trainerGender
       this.isFatefulEncounter = other.isFatefulEncounter ?? false
+
+      const pidAbilityNum = this.personalityValue % 2 === 1 ? AbilityNumber.Second : AbilityNumber.First
+      if (
+        OriginGames.generation(other.gameOfOrigin) <= Generation.G2 ||
+        !this.ability
+      ) {
+        this.ability = this.metadata?.abilityByNum(pidAbilityNum) ?? this.ability
+      }
     }
     this.checksum = this.calculateChecksum() // MUST GO AFTER ALL FIELDS ARE INITIALIZED
   }

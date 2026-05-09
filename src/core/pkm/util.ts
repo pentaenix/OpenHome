@@ -8,6 +8,7 @@ import {
   metadataReaderFor,
   MetadataSource,
   MetadataSummaryLookup,
+  OriginGame,
   PkmType,
   SpeciesAndForm,
 } from '@pkm-rs/pkg'
@@ -160,7 +161,7 @@ export const getTypes = (mon: PKMInterface): PkmType[] => {
   const metadataReader =
     mon.format === 'OHPKM'
       ? currentMetadataReader(mon.dexNum, mon.formNum)
-      : metadataReaderFor(MetadataSourceByFormat(mon.format), mon.dexNum, mon.formNum)
+      : metadataReaderFor(metadataSourceForFormatPk(mon), mon.dexNum, mon.formNum)
 
   if (!metadataReader) {
     return ['Normal']
@@ -172,10 +173,15 @@ export const getTypes = (mon: PKMInterface): PkmType[] => {
   return type2 ? [type1, type2] : [type1]
 }
 
+function metadataSourceForFormatPk(mon: PKMInterface): MetadataSource {
+  if (mon.format === 'PK1') {
+    return mon.gameOfOrigin === OriginGame.Yellow ? MetadataSource.Yellow : MetadataSource.RedBlue
+  }
+  return MetadataSourceByFormat(mon.format as MonFormat)
+}
+
 function MetadataSourceByFormat(format: MonFormat): MetadataSource {
   switch (format) {
-    case 'PK1':
-      return MetadataSource.Yellow
     case 'PK2':
       return MetadataSource.Crystal
     case 'PK3':

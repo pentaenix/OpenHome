@@ -222,19 +222,26 @@ pub enum LevelUpType {
 }
 
 impl LevelUpType {
+    /// Maximum level `L` in `1..=100` such that `exp >= thresholds[L - 1]`
+    /// (`thresholds[0]` is minimum EXP for level 2; level 1 is always EXP ≥ 0).
     pub fn calculate_level(&self, exp: u32) -> u8 {
-        self.get_thresholds()
-            .iter()
-            .position(|threshold| *threshold >= exp)
-            .unwrap_or(99) as u8
-            + 1
+        let t = self.get_thresholds();
+        let mut level = 1u8;
+        for next_level in 2..=100u8 {
+            if exp >= t[next_level as usize - 1] {
+                level = next_level;
+            } else {
+                break;
+            }
+        }
+        level
     }
 
     pub fn get_min_exp_for_level(&self, level: u8) -> u32 {
-        if level > 100 {
-            panic!("level too high: {level}")
+        if level == 0 || level > 100 {
+            panic!("level out of range: {level}")
         }
-        self.get_thresholds()[level as usize]
+        self.get_thresholds()[(level - 1) as usize]
     }
 
     const fn get_thresholds(&self) -> [u32; 100] {

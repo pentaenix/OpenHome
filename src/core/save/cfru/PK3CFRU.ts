@@ -244,7 +244,8 @@ export abstract class PK3CFRU implements PluginPKMInterface {
       const converter = new PkmConverter(this.getFormat(), options.strategy)
       const metData = converter.metData(other)
 
-      this.personalityValue = generatePersonalityValuePreservingAttributes(other) ?? 0
+      this.personalityValue =
+        other.personalityValue ?? generatePersonalityValuePreservingAttributes(other) ?? 0
       this.trainerID = other.trainerID
       this.secretID = other.secretID
       this.language = other.language

@@ -3,7 +3,7 @@ import { PKMInterface } from '@openhome-core/pkm/interfaces'
 import { dvsFromIVs, getBaseMon } from '@openhome-core/pkm/util'
 import { Option } from '@openhome-core/util/functional'
 import { PKMFormeRef } from '@openhome-core/util/types'
-import { MetadataSummaryLookup, OriginGame, OriginGames } from '@pkm-rs/pkg'
+import { Generation, MetadataSummaryLookup, OriginGame, OriginGames } from '@pkm-rs/pkg'
 import { generatePersonalityValuePreservingAttributes } from '@pokemon-files/util'
 import { gen12StringToUTF, utf16StringToGen12 } from '../save/util/Strings'
 import { bytesToString } from '../save/util/byteLogic'
@@ -81,20 +81,19 @@ export const getMonGen345Identifier = (mon: PKMInterface): Option<Gen345Identifi
   const baseMon = getBaseMon(mon.dexNum, mon.formNum)
 
   try {
-    const ohpkm = new OHPKM(mon)
-    let pk3CompatiblePID
-
-    if (mon instanceof OHPKM) {
-      // Get the personality value that will be generated
-      pk3CompatiblePID = generatePersonalityValuePreservingAttributes(mon)
-    } else if (mon.personalityValue !== undefined) {
+    // Use the same PID bytes as the save / PKM projection. A synthetic PID from
+    // generatePersonalityValuePreservingAttributes can differ from the canonical value
+    // (e.g. minted nature vs PID nature), which breaks loadIfTracked on roundtrip and
+    // makes Gen345 Pokémon look "untracked" so a new projection can change the PID.
+    let pk3CompatiblePID: number
+    if (mon.personalityValue !== undefined) {
       pk3CompatiblePID = mon.personalityValue
     } else {
-      return undefined
+      pk3CompatiblePID = generatePersonalityValuePreservingAttributes(mon)
     }
 
-    const trainerId = ohpkm.trainerID
-    const secretId = ohpkm.secretID
+    const trainerId = mon.trainerID
+    const secretId = mon.secretID ?? 0
 
     if (baseMon) {
       return `${baseMon.nationalDex.toString().padStart(4, '0')}-${bytesToString(
@@ -106,6 +105,26 @@ export const getMonGen345Identifier = (mon: PKMInterface): Option<Gen345Identifi
     console.error(`getMonGen345Identifier: ${error}`)
   }
   return undefined
+}
+
+/**
+ * GB-origin Pokémon projected into Gen 3/4/5 are synthetic at the legality layer.
+ * Do not rebind them to an older tracked mon just because the generated Gen345 key matches;
+ * that can pull stale encounter state back into the save reconcile path.
+ */
+export function shouldReuseTrackedGen345Mon(mon: PKMInterface): boolean {
+  switch (mon.format) {
+    case 'PK3':
+    case 'COLOPKM':
+    case 'XDPKM':
+    case 'PK3RR':
+    case 'PK3UB':
+    case 'PK4':
+    case 'PK5':
+      return OriginGames.generation(mon.gameOfOrigin) > Generation.G2
+    default:
+      return true
+  }
 }
 
 export function isEvolution(prevo: PKMFormeRef, possibleEvo: PKMFormeRef): boolean {

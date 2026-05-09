@@ -1,6 +1,6 @@
 import { bytesToPKM } from '@openhome-core/pkm/FileImport'
 import { ConvertStrategies, ConvertStrategy } from '@pkm-rs/pkg'
-import { PK3 } from '@pokemon-files/pkm'
+import { PK2, PK3 } from '@pokemon-files/pkm'
 import fs from 'fs'
 import { TextDecoder } from 'node:util' // (ESM style imports)
 import path from 'path'
@@ -15,6 +15,7 @@ beforeAll(initializeWasm)
 var blazikenOhpkm: OHPKM
 var blazikenPk3: PK3
 var slowbroOhpkm: OHPKM
+var hoohPk2: PK2
 
 beforeAll(() => {
   blazikenOhpkm = bytesToPKM(
@@ -31,6 +32,11 @@ beforeAll(() => {
     new Uint8Array(fs.readFileSync(path.join(__dirname, './PKMFiles/OhpkmV2', 'slowbro.ohpkm'))),
     'OHPKM'
   ) as OHPKM
+
+  hoohPk2 = bytesToPKM(
+    new Uint8Array(fs.readFileSync(path.join(__dirname, './PKMFiles/Gen2', 'hooh.pk2'))),
+    'PK2'
+  ) as PK2
 })
 
 test('gen 3 stat calculations', () => {
@@ -158,4 +164,12 @@ test('gen 6+ nature accuracy', () => {
   const converted = PK3.fromOhpkm(slowbroOhpkm, ConvertStrategies.getDefault())
 
   expect(converted.nature.index).toEqual(slowbroOhpkm.nature.index)
+})
+
+test('gen 2 origin normalizes pk3 ability state', () => {
+  const converted = PK3.fromOhpkm(new OHPKM(hoohPk2), ConvertStrategies.getDefault())
+
+  expect([1, 2]).toContain(converted.abilityNum)
+  expect(converted.abilityNum).toEqual(converted.personalityValue % 2 === 1 ? 2 : 1)
+  expect(converted.ability?.index).toBeDefined()
 })

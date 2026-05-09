@@ -93,9 +93,23 @@ impl OhpkmConvert for Pk7 {
         let form_metadata = ohpkm.get_forme_metadata();
         let converter = PkmConverter::new(PkmFormat::PK7, strategy);
         let met_data = converter.met_data(ohpkm);
+        let gb_origin = ohpkm.get_game_of_origin().is_gameboy();
+        let ability_num = if gb_origin {
+            if ohpkm.personality_value() % 2 == 1 {
+                AbilityNumber::Second
+            } else {
+                AbilityNumber::First
+            }
+        } else {
+            ohpkm.ability_num()
+        };
 
         let mut mon = Self {
-            encryption_constant: ohpkm.encryption_constant(),
+            encryption_constant: if gb_origin {
+                ohpkm.personality_value()
+            } else {
+                ohpkm.encryption_constant()
+            },
             sanity: 0,
             checksum: 0,
             species_and_form: ohpkm.species_and_form(),
@@ -103,18 +117,21 @@ impl OhpkmConvert for Pk7 {
             trainer_id: ohpkm.trainer_id(),
             secret_id: ohpkm.secret_id(),
             exp: ohpkm.exp(),
-            ability_index: ohpkm.ability_index().change_bound().unwrap_or(
-                form_metadata
-                    .get_ability(ohpkm.ability_num())
-                    .change_bound()
-                    .unwrap_or(
-                        form_metadata
-                            .get_ability(AbilityNumber::First)
-                            .change_bound()
-                            .expect("Pk7 max ability <= overall max ability"),
-                    ),
-            ),
-            ability_num: ohpkm.ability_num(),
+            ability_index: form_metadata
+                .get_ability(ability_num)
+                .change_bound()
+                .unwrap_or(
+                    ohpkm
+                        .ability_index()
+                        .change_bound()
+                        .unwrap_or(
+                            form_metadata
+                                .get_ability(AbilityNumber::First)
+                                .change_bound()
+                                .expect("Pk7 max ability <= overall max ability"),
+                        ),
+                ),
+            ability_num,
             markings: ohpkm.markings(),
             personality_value: ohpkm.personality_value(),
             nature: ohpkm.nature(),

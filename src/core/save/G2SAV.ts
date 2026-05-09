@@ -1,5 +1,10 @@
 import { get8BitChecksum } from '@openhome-core/save/util/byteLogic'
 import { gen12StringToUTF, utf16StringToGen12 } from '@openhome-core/save/util/Strings'
+import {
+  rememberedGen12BoxStringBytesForWrite,
+  rememberGen12BoxStringBytes,
+} from '@openhome-core/save/util/gen12BoxStringBytes'
+import { gen12BoxNicknameForEncode } from '@openhome-core/save/util/gen12BoxNicknameEncode'
 import { Option, unique } from '@openhome-core/util/functional'
 import {
   ConvertStrategy,
@@ -21,6 +26,8 @@ import { emptyPathData, PathData } from './util/path'
 const CURRENT_BOX_OFFSET_GS_INTL = 0x2724
 const CURRENT_BOX_OFFSET_C_INTL = 0x2700
 const MIN_SAVE_SIZE_BYTES = 0x8000
+/** Gen II retail saves are on the order of 32–64 KiB; refuse huge buffers as G2 to avoid mis-detection. */
+const MAX_G2_SAVE_SIZE_BYTES = 0x20000
 
 export class G2SAV extends OfficialSAV<PK2> {
   static pkmType = PK2
@@ -88,39 +95,80 @@ export class G2SAV extends OfficialSAV<PK2> {
 
     const pokemonPerBox = this.boxRows * this.boxColumns
 
-    this.boxOffsets.forEach((offset, boxNumber) => {
-      const monCount = bytes[offset]
-
+    this.boxOffsets.forEach((_offset, boxNumber) => {
       this.boxes[boxNumber] = new Box(`Box ${boxNumber + 1}`, pokemonPerBox)
-      for (let monIndex = 0; monIndex < monCount; monIndex++) {
-        const mon = PK2.fromBytes(
-          this.bytes.slice(
-            offset + 1 + pokemonPerBox + 1 + monIndex * 0x20,
-            offset + 1 + pokemonPerBox + 1 + (monIndex + 1) * 0x20
-          ).buffer
-        )
-
-        mon.trainerName = gen12StringToUTF(
-          this.bytes,
-          offset + 1 + pokemonPerBox + 1 + pokemonPerBox * 0x20 + monIndex * 11,
-          11
-        )
-        mon.nickname = gen12StringToUTF(
-          this.bytes,
-          offset +
-            1 +
-            pokemonPerBox +
-            1 +
-            pokemonPerBox * 0x20 +
-            pokemonPerBox * 11 +
-            monIndex * 11,
-          11
-        )
-        mon.gameOfOrigin = mon.metLevel ? OriginGame.Crystal : this.origin
-        mon.language = Language.English
-        this.boxes[boxNumber].boxSlots[monIndex] = mon
-      }
+      this.decodeG2Box(boxNumber)
     })
+  }
+
+  /**
+   * Gen 2 boxes are stored packed (count + contiguous mons). Move all occupied slots to the front
+   * before writing so the save matches what `prepareForSaving` emits and avoiding sparse in-memory
+   * state after pulls.
+   */
+  private compactG2BoxSlotsInPlace(box: Box<PK2>): void {
+    const filled = box.boxSlots.filter((m): m is PK2 => m !== undefined && m !== null)
+    for (let i = 0; i < box.boxSlots.length; i += 1) {
+      box.boxSlots[i] = filled[i]
+    }
+  }
+
+  /** Rebuild `boxSlots` for one box from `this.bytes` (packed PC layout). */
+  private decodeG2Box(boxNumber: number): void {
+    const offset = this.boxOffsets[boxNumber]
+    const pokemonPerBox = this.boxRows * this.boxColumns
+    const rawCount = this.bytes[offset]
+    if (rawCount > pokemonPerBox) {
+      console.warn(
+        `G2SAV: box ${boxNumber} count byte ${rawCount} exceeds ${pokemonPerBox}; clamping (save may be corrupt).`
+      )
+    }
+    const monCount = Math.min(rawCount, pokemonPerBox)
+    const box = this.boxes[boxNumber]
+
+    for (let i = 0; i < pokemonPerBox; i += 1) {
+      box.boxSlots[i] = undefined
+    }
+
+    for (let monIndex = 0; monIndex < monCount; monIndex++) {
+      const mon = PK2.fromBytes(
+        this.bytes.slice(
+          offset + 1 + pokemonPerBox + 1 + monIndex * 0x20,
+          offset + 1 + pokemonPerBox + 1 + (monIndex + 1) * 0x20
+        ).buffer
+      )
+
+      const trainerNameOffset =
+        offset + 1 + pokemonPerBox + 1 + pokemonPerBox * 0x20 + monIndex * 11
+      const nicknameOffset =
+        offset +
+        1 +
+        pokemonPerBox +
+        1 +
+        pokemonPerBox * 0x20 +
+        pokemonPerBox * 11 +
+        monIndex * 11
+      const trainerNameBytes = this.bytes.slice(trainerNameOffset, trainerNameOffset + 11)
+      const nicknameBytes = this.bytes.slice(nicknameOffset, nicknameOffset + 11)
+      mon.trainerName = gen12StringToUTF(trainerNameBytes, 0, 11)
+      mon.nickname = gen12StringToUTF(nicknameBytes, 0, 11)
+      rememberGen12BoxStringBytes(mon, trainerNameBytes, nicknameBytes)
+      mon.gameOfOrigin = mon.metLevel ? OriginGame.Crystal : this.origin
+      mon.language = Language.English
+      box.boxSlots[monIndex] = mon
+    }
+  }
+
+  private assertG2BoxCountConsistent(boxNumber: number): void {
+    const offset = this.boxOffsets[boxNumber]
+    const recorded = this.bytes[offset]
+    const box = this.boxes[boxNumber]
+    const actual = box.boxSlots.reduce<number>((n, s) => n + (s ? 1 : 0), 0)
+    if (recorded !== actual) {
+      console.warn(
+        `G2SAV: box ${boxNumber} count mismatch after save (bytes=${recorded}, slots=${actual}); save layout may be wrong.`
+      )
+    }
   }
 
   prepareForSaving() {
@@ -130,6 +178,7 @@ export class G2SAV extends OfficialSAV<PK2> {
     changedBoxes.forEach((boxNumber) => {
       const boxByteOffset = this.boxOffsets[boxNumber]
       const box = this.boxes[boxNumber]
+      this.compactG2BoxSlotsInPlace(box)
       // functions as an index, to skip empty slots
       let numMons = 0
 
@@ -143,14 +192,23 @@ export class G2SAV extends OfficialSAV<PK2> {
             boxByteOffset + 1 + pokemonPerBox + 1 + numMons * 0x20
           )
           // set the mon's OT name in the box
-          const trainerNameBuffer = utf16StringToGen12(boxMon.trainerName, 11, true)
+          const trainerNameBuffer =
+            rememberedGen12BoxStringBytesForWrite(boxMon, 'trainerName', boxMon.trainerName, 11) ??
+            utf16StringToGen12(boxMon.trainerName, 11, true)
 
           this.bytes.set(
             trainerNameBuffer,
             boxByteOffset + 1 + pokemonPerBox + 1 + pokemonPerBox * 0x20 + numMons * 11
           )
           // set the mon's nickname in the box
-          const nicknameBuffer = utf16StringToGen12(boxMon.nickname, 11, true)
+          const nicknameText = gen12BoxNicknameForEncode(
+            boxMon.dexNum,
+            boxMon.language,
+            boxMon.nickname
+          )
+          const nicknameBuffer =
+            rememberedGen12BoxStringBytesForWrite(boxMon, 'nickname', boxMon.nickname, 11) ??
+            utf16StringToGen12(nicknameText, 11, true).fill(0x50, nicknameText.length)
 
           this.bytes.set(
             nicknameBuffer,
@@ -195,6 +253,9 @@ export class G2SAV extends OfficialSAV<PK2> {
       }
       // add terminator
       this.bytes[boxByteOffset + 1 + numMons] = 0xff
+
+      this.decodeG2Box(boxNumber)
+      this.assertG2BoxCountConsistent(boxNumber)
     })
     switch (this.origin) {
       case OriginGame.Gold:
@@ -281,6 +342,9 @@ export class G2SAV extends OfficialSAV<PK2> {
 
   static fileIsSave(bytes: Uint8Array): boolean {
     if (bytes.length < MIN_SAVE_SIZE_BYTES) {
+      return false
+    }
+    if (bytes.length > MAX_G2_SAVE_SIZE_BYTES) {
       return false
     }
     try {

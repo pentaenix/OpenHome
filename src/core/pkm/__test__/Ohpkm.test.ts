@@ -1,6 +1,6 @@
 import PB8LUMI from '@openhome-core/save/luminescentplatinum/PB8LUMI'
-import { ConvertStrategies, ConvertStrategy, ExtraFormIndex, OriginGame } from '@pkm-rs/pkg'
-import { PA8, PK3, PK4, PK7, PK8, PK9 } from '@pokemon-files/pkm'
+import { AbilityNumber, ConvertStrategies, ConvertStrategy, ExtraFormIndex, OriginGame } from '@pkm-rs/pkg'
+import { PA8, PK2, PK3, PK4, PK5, PK6, PK7, PK8, PK9 } from '@pokemon-files/pkm'
 import { HyperTrainStats, Stats } from '@pokemon-files/util'
 import { getFormatLocationString } from '@pokemon-resources/locations'
 import fs from 'fs'
@@ -373,6 +373,74 @@ describe('OHPKM conversion strategies', () => {
       getFormatLocationString(pk7.metLocationIndex, 'PK7'),
       'Omega Ruby -> PK7 location index is Hoenn with location match strategy'
     ).toContain('Hoenn')
+  })
+
+  test('gen 1/2 origin projects to pal park style gen 4 data', () => {
+    const hoohPk2 = PK2.fromBytes(
+      new Uint8Array(
+        fs.readFileSync(path.join(__dirname, 'PKMFiles', 'Gen2', 'hooh.pk2'))
+      ).buffer
+    )
+    const pk4 = PK4.fromOhpkm(new OHPKM(hoohPk2), LEGALITY_STRATEGY)
+
+    expect(
+      getFormatLocationString(pk4.metLocationIndex, 'PK4'),
+      'GB-origin mon should present as a transfer-style Gen 4 encounter'
+    ).toContain('Pal Park')
+    expect(pk4.encounterType).toEqual(0)
+
+    const pidAbilityNum = pk4.personalityValue % 2 === 1 ? AbilityNumber.Second : AbilityNumber.First
+    expect(pk4.ability?.index).toEqual(pk4.metadata?.abilityByNumGen3(pidAbilityNum)?.index)
+    expect(pk4.ability?.index).toBeDefined()
+  })
+
+  test('gen 1/2 origin projects to transfer-style gen 5/6/7 data', () => {
+    const hoohPk2 = PK2.fromBytes(
+      new Uint8Array(
+        fs.readFileSync(path.join(__dirname, 'PKMFiles', 'Gen2', 'hooh.pk2'))
+      ).buffer
+    )
+    const ohpkm = new OHPKM(hoohPk2)
+    ohpkm.gameOfOrigin = OriginGame.Gold
+
+    const expectedAbilityNum =
+      ohpkm.personalityValue % 2 === 1 ? AbilityNumber.Second : AbilityNumber.First
+
+    const pk5 = PK5.fromOhpkm(ohpkm, LEGALITY_STRATEGY)
+    expect(pk5.gameOfOrigin).toEqual(OriginGame.Gold)
+    expect(pk5.metLocationIndex).toEqual(30001)
+    expect(pk5.ability?.index).toEqual(pk5.metadata?.abilityByNum(expectedAbilityNum)?.index)
+
+    const pk6 = PK6.fromOhpkm(ohpkm, LEGALITY_STRATEGY)
+    expect(pk6.gameOfOrigin).toEqual(OriginGame.Gold)
+    expect(pk6.metLocationIndex).toEqual(30001)
+    expect(pk6.encryptionConstant).toEqual(pk6.personalityValue)
+    expect(pk6.ability?.index).toEqual(pk6.metadata?.abilityByNum(expectedAbilityNum)?.index)
+
+    const pk7 = PK7.fromOhpkm(ohpkm, LEGALITY_STRATEGY)
+    expect(pk7.gameOfOrigin).toEqual(OriginGame.Gold)
+    expect(pk7.metLocationIndex).toEqual(30001)
+    expect(pk7.encryptionConstant).toEqual(pk7.personalityValue)
+    expect(pk7.ability?.index).toEqual(pk7.metadata?.abilityByNum(expectedAbilityNum)?.index)
+  })
+
+  test('gen 1/2 origin projects to link-trade style gen 3 data', () => {
+    const hoohPk2 = PK2.fromBytes(
+      new Uint8Array(
+        fs.readFileSync(path.join(__dirname, 'PKMFiles', 'Gen2', 'hooh.pk2'))
+      ).buffer
+    )
+    const ohpkm = new OHPKM(hoohPk2)
+    ohpkm.gameOfOrigin = OriginGame.Gold
+
+    const expectedAbilityNum =
+      ohpkm.personalityValue % 2 === 1 ? AbilityNumber.Second : AbilityNumber.First
+
+    const pk3 = PK3.fromOhpkm(ohpkm, LEGALITY_STRATEGY)
+    expect(pk3.gameOfOrigin).toEqual(OriginGame.Emerald)
+    expect(pk3.metLocationIndex).toEqual(254)
+    expect(pk3.abilityNum).toEqual(expectedAbilityNum)
+    expect(pk3.ability?.index).toEqual(pk3.metadata?.abilityByNum(expectedAbilityNum)?.index)
   })
 })
 

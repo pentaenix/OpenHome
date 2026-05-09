@@ -5,6 +5,7 @@ import {
   Item,
   Language,
   Languages,
+  Lookup,
   MetadataSummaryLookup,
   NatureIndex,
   SpeciesLookup,
@@ -251,7 +252,11 @@ export default class PK8 {
       this.currentHP = other.currentHP ?? 0
       this.ivs = converter.ivs(other)
       this.isEgg = other.isEgg
-      this.isNicknamed = other.isNicknamed
+      {
+        const speciesName = Lookup.speciesName(other.dexNum, other.language)
+        this.isNicknamed =
+          this.nickname.trim() === speciesName.trim() ? false : (other.isNicknamed ?? true)
+      }
       this.dynamaxLevel = other.dynamaxLevel ?? 0
       this.statusCondition = 0
       this.palma = other.palma ?? 0

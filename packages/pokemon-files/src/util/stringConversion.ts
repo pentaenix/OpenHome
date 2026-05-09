@@ -255,6 +255,7 @@ const Gen3CharacterSet = [
 ]
 
 export const GBStringDict: { [key: number]: string } = {
+  [G1_TRADE_OT]: '*',
   0x7f: ' ',
   0x80: 'A',
   0x81: 'B',

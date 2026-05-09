@@ -4,11 +4,14 @@ import {
   AbilityIndex,
   Ball,
   ConvertStrategy,
+  Generation,
   Item,
   Language,
   Languages,
+  Lookup,
   MetadataSummaryLookup,
   NatureIndex,
+  OriginGames,
   SpeciesLookup,
 } from '@pkm-rs/pkg'
 import { OHPKM } from '../../../../src/core/pkm/OHPKM'
@@ -167,14 +170,20 @@ export default class PK5 {
       const metData = converter.metData(other)
 
       this.personalityValue = this.personalityValue =
-        generatePersonalityValuePreservingAttributes(other)
+        other.personalityValue ?? generatePersonalityValuePreservingAttributes(other)
       this.dexNum = other.dexNum
       this.heldItemIndex = other.heldItemIndex
       this.trainerID = other.trainerID
       this.secretID = other.secretID
       this.exp = other.exp
       this.trainerFriendship = other.trainerFriendship
-      this.ability = other.ability
+      const isGameBoyOrigin = OriginGames.generation(other.gameOfOrigin) <= Generation.G2
+      const formNum = other.formNum
+      const abilityNum = isGameBoyOrigin ? other.abilityNumFromPidGen34() : other.abilityNum ?? 0
+      this.ability =
+        (isGameBoyOrigin
+          ? MetadataSummaryLookup(this.dexNum, formNum)?.abilityByNum(abilityNum)
+          : other.ability) ?? MetadataSummaryLookup(this.dexNum, formNum)?.abilityByNum(abilityNum)
       this.markings = types.markingsSixShapesNoColorFromOther(other.markings)
       this.language = other.language
       this.evs = other.evs
@@ -187,9 +196,8 @@ export default class PK5 {
 
       this.ivs = converter.ivs(other)
       this.isEgg = other.isEgg
-      this.isNicknamed = other.isNicknamed
       this.gender = other.gender
-      this.formNum = other.formNum
+      this.formNum = formNum
       this.nature = other.nature
       this.isNsPokemon = other.isNsPokemon ?? false
       this.eggDate = other.eggDate
@@ -213,6 +221,11 @@ export default class PK5 {
       this.ribbons = filterRibbons(other.ribbons ?? [], [Gen4Ribbons], '')
       this.isFatefulEncounter = other.isFatefulEncounter ?? false
       this.nickname = converter.nickname(other)
+      {
+        const speciesName = Lookup.speciesName(other.dexNum, other.language)
+        this.isNicknamed =
+          this.nickname.trim() === speciesName.trim() ? false : (other.isNicknamed ?? true)
+      }
       this.trainerName = other.trainerName
       this.trainerGender = other.trainerGender
     }
