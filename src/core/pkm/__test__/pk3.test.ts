@@ -1,5 +1,5 @@
 import { bytesToPKM } from '@openhome-core/pkm/FileImport'
-import { ConvertStrategies, ConvertStrategy } from '@pkm-rs/pkg'
+import { ConvertStrategies, ConvertStrategy, Language } from '@pkm-rs/pkg'
 import { PK2, PK3 } from '@pokemon-files/pkm'
 import fs from 'fs'
 import { TextDecoder } from 'node:util' // (ESM style imports)
@@ -172,4 +172,17 @@ test('gen 2 origin normalizes pk3 ability state', () => {
   expect([1, 2]).toContain(converted.abilityNum)
   expect(converted.abilityNum).toEqual(converted.personalityValue % 2 === 1 ? 2 : 1)
   expect(converted.ability?.index).toBeDefined()
+})
+
+test('gen 2 origin normalizes pk3 evs for transfer legality', () => {
+  const source = new OHPKM(hoohPk2)
+  source.language = Language.None
+  source.evs = { hp: 120, atk: 120, def: 120, spe: 120, spa: 120, spd: 120 }
+
+  const converted = PK3.fromOhpkm(source, ConvertStrategies.getDefault())
+  const values = Object.values(converted.evs)
+
+  expect(converted.language).toEqual(Language.English)
+  expect(values.every((value) => value <= 100)).toBe(true)
+  expect(values.reduce((sum, value) => sum + value, 0)).toBeLessThanOrEqual(510)
 })

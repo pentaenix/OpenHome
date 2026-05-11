@@ -1,5 +1,4 @@
 import { Gen4Ribbons } from '@pokemon-resources/index'
-
 import {
   AbilityIndex,
   AbilityNumber,
@@ -22,6 +21,13 @@ import * as byteLogic from '../util/byteLogic'
 import * as encryption from '../util/encryption'
 import { FourMoves } from '../util/pkmInterface'
 import { filterRibbons } from '../util/ribbonLogic'
+import {
+  currentPkmDate,
+  normalizeGbOriginTransferEvs,
+  normalizeGen4Evs,
+  validGen4Language,
+  validPkmDate,
+} from '../util/gen4Projection'
 import { getStats } from '../util/statCalc'
 import * as stringLogic from '../util/stringConversion'
 import * as types from '../util/types'
@@ -214,15 +220,8 @@ export default class PK4 {
         star: false,
         diamond: false,
       }
-      this.language = other.language
-      this.evs = other.evs ?? {
-        hp: 0,
-        atk: 0,
-        def: 0,
-        spe: 0,
-        spa: 0,
-        spd: 0,
-      }
+      this.language = validGen4Language(other.language) ? other.language : Language.English
+      this.evs = OriginGames.generation(other.gameOfOrigin) <= Generation.G2 ? normalizeGbOriginTransferEvs(other.evs ?? { hp: 0, atk: 0, def: 0, spe: 0, spa: 0, spd: 0 }) : normalizeGen4Evs(other.evs ?? { hp: 0, atk: 0, def: 0, spe: 0, spa: 0, spd: 0 })
       this.contest = other.contest ?? {
         cool: 0,
         beauty: 0,
@@ -247,12 +246,7 @@ export default class PK4 {
       this.gameOfOrigin = other.gameOfOrigin
       // Gen III has no egg receipt date; inventing one breaks PKHeX. Omit unless OHPKM supplied it.
       this.eggDate = other.eggDate
-      const now = new Date()
-      this.metDate = other.metDate ?? {
-        month: now.getMonth() + 1,
-        day: now.getDate(),
-        year: now.getFullYear(),
-      }
+      this.metDate = validPkmDate(other.metDate) ? other.metDate : currentPkmDate()
       this.pokerusByte = other.pokerusByte ?? 0
 
       if (other.ball && PK4.maxValidBall() >= other.ball) {
@@ -294,6 +288,8 @@ export default class PK4 {
 
       if (OriginGames.generation(other.gameOfOrigin) <= Generation.G2) {
         this.metLocationIndex = PAL_PARK_GEN_4
+        this.metLocationIndexDP = PAL_PARK_GEN_4
+        this.metLocationIndexPtHGSS = 0
         this.encounterType = 0
       }
 
@@ -322,7 +318,7 @@ export default class PK4 {
         OriginGames.generation(other.gameOfOrigin) <= Generation.G2 ||
         !this.ability
       ) {
-        this.ability = this.metadata?.abilityByNum(pidAbilityNum) ?? this.ability
+        this.ability = this.metadata?.abilityByNumGen3(pidAbilityNum) ?? this.ability
       }
     }
     this.checksum = this.calculateChecksum() // MUST GO AFTER ALL FIELDS ARE INITIALIZED

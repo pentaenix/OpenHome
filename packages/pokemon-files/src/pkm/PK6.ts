@@ -1,4 +1,5 @@
 import {
+  AbilityNumber,
   AbilityIndex,
   Ball,
   ConvertStrategy,
@@ -11,6 +12,7 @@ import {
   Lookup,
   MetadataSummaryLookup,
   NatureIndex,
+  OriginGame,
   OriginGames,
   orasFormIndexIfSupported,
   SpeciesLookup,
@@ -23,11 +25,36 @@ import * as byteLogic from '../util/byteLogic'
 import * as encryption from '../util/encryption'
 import { FourMoves } from '../util/pkmInterface'
 import { filterRibbons } from '../util/ribbonLogic'
+import {
+  currentPkmDate,
+  normalizeGbOriginTransferEvs,
+  normalizeGen4Evs,
+  validGen4Language,
+  validPkmDate,
+} from '../util/gen4Projection'
 import { getStats } from '../util/statCalc'
 import * as stringLogic from '../util/stringConversion'
 import * as types from '../util/types'
-import { MoveFilter } from '../util/util'
+import { generatePersonalityValuePreservingAttributes, MoveFilter } from '../util/util'
 import { PkmConstructorOptions } from './PKM'
+
+const DEFAULT_3DS_GEOLOCATION = { country: 49, region: 7 }
+const DEFAULT_3DS_CONSOLE_REGION = 1
+const EMPTY_MEMORY = { intensity: 0, memory: 0, feeling: 0, textVariables: 0 }
+
+function legalGen6OriginForGameBoy(origin: OriginGame): OriginGame {
+  switch (origin) {
+    case OriginGame.BlueJpn:
+      return OriginGame.LeafGreen
+    case OriginGame.Gold:
+    case OriginGame.Crystal:
+      return OriginGame.HeartGold
+    case OriginGame.Silver:
+      return OriginGame.SoulSilver
+    default:
+      return OriginGame.FireRed
+  }
+}
 
 export default class PK6 {
   static getFormat() {
@@ -238,11 +265,18 @@ export default class PK6 {
         other.extraFormIndex !== undefined
           ? (orasFormIndexIfSupported(other.extraFormIndex) ?? 0)
           : other.formNum
-      const abilityNum = isGameBoyOrigin ? other.abilityNumFromPidGen34() : other.abilityNum ?? 0
+      const personalityValue =
+        (isGameBoyOrigin ? generatePersonalityValuePreservingAttributes(other) : undefined) ??
+        other.personalityValue ??
+        generatePersonalityValuePreservingAttributes(other) ??
+        1
+      const pidAbilityNum =
+        personalityValue % 2 === 1 ? AbilityNumber.Second : AbilityNumber.First
+      const abilityNum = isGameBoyOrigin ? pidAbilityNum : other.abilityNum ?? 0
 
       this.encryptionConstant =
-        isGameBoyOrigin && other.personalityValue !== undefined
-          ? other.personalityValue
+        isGameBoyOrigin
+          ? personalityValue
           : other.encryptionConstant ?? 0
       this.dexNum = other.dexNum
       this.heldItemIndex = other.heldItemIndex
@@ -252,11 +286,11 @@ export default class PK6 {
       this.abilityNum = abilityNum
       this.ability =
         (isGameBoyOrigin
-          ? MetadataSummaryLookup(this.dexNum, formNum)?.abilityByNum(abilityNum)
+          ? MetadataSummaryLookup(this.dexNum, formNum)?.abilityByNumGen3(abilityNum)
           : other.ability) ?? MetadataSummaryLookup(this.dexNum, formNum)?.abilityByNum(abilityNum)
       this.trainingBagHits = other.trainingBagHits ?? 0
       this.trainingBag = other.trainingBag ?? 0
-      this.personalityValue = other.personalityValue ?? 0
+      this.personalityValue = personalityValue
       this.nature = other.nature
       if (other.extraFormIndex !== undefined) {
         const orasIndex = orasFormIndexIfSupported(other.extraFormIndex)
@@ -267,14 +301,9 @@ export default class PK6 {
       this.formNum = formNum
 
       this.gender = other.gender ?? 0
-      this.evs = other.evs ?? {
-        hp: 0,
-        atk: 0,
-        def: 0,
-        spe: 0,
-        spa: 0,
-        spd: 0,
-      }
+      this.evs = isGameBoyOrigin
+        ? normalizeGbOriginTransferEvs(other.evs)
+        : normalizeGen4Evs(other.evs)
       this.contest = other.contest ?? {
         cool: 0,
         beauty: 0,
@@ -308,7 +337,7 @@ export default class PK6 {
       this.secretSuperTrainingUnlocked = other.secretSuperTrainingUnlocked ?? false
       this.secretSuperTrainingComplete = other.secretSuperTrainingComplete ?? false
       this.ivs = converter.ivs(other)
-      this.isEgg = other.isEgg
+      this.isEgg = isGameBoyOrigin ? false : other.isEgg
       {
         const speciesName = Lookup.speciesName(other.dexNum, other.language)
         this.isNicknamed =
@@ -317,7 +346,15 @@ export default class PK6 {
       this.handlerName = other.handlerName
       this.handlerGender = other.handlerGender
       this.isCurrentHandler = other.isCurrentHandler
-      this.geolocations = other.geolocations ?? [
+      this.geolocations = isGameBoyOrigin
+        ? [
+            DEFAULT_3DS_GEOLOCATION,
+            { region: 0, country: 0 },
+            { region: 0, country: 0 },
+            { region: 0, country: 0 },
+            { region: 0, country: 0 },
+          ]
+        : other.geolocations ?? [
         {
           region: 0,
           country: 0,
@@ -341,29 +378,29 @@ export default class PK6 {
       ]
       this.handlerFriendship = other.handlerFriendship
       this.handlerAffection = other.handlerAffection
-      this.handlerMemory = other.handlerMemory
-      this.trainerMemory = other.trainerMemory
+      this.handlerMemory = isGameBoyOrigin ? EMPTY_MEMORY : other.handlerMemory
+      this.trainerMemory = isGameBoyOrigin ? EMPTY_MEMORY : other.trainerMemory
       this.fullness = other.fullness ?? 0
       this.enjoyment = other.enjoyment ?? 0
       this.trainerName = other.trainerName
       this.trainerFriendship = other.trainerFriendship
       this.trainerAffection = other.trainerAffection
-      this.eggDate = other.eggDate ?? undefined
-      this.metDate = other.metDate
-      this.eggLocationIndex = other.eggLocationIndex ?? 0
-      this.gameOfOrigin = metData.gameOfOrigin
-      this.metLocationIndex = metData.locationIndex
+      this.eggDate = isGameBoyOrigin ? undefined : other.eggDate ?? undefined
+      this.metDate = validPkmDate(other.metDate) ? other.metDate : currentPkmDate()
+      this.eggLocationIndex = isGameBoyOrigin ? 0 : other.eggLocationIndex ?? 0
+      this.gameOfOrigin = isGameBoyOrigin ? legalGen6OriginForGameBoy(other.gameOfOrigin) : metData.gameOfOrigin
+      this.metLocationIndex = isGameBoyOrigin ? 30001 : metData.locationIndex
       if (other.ball && PK6.maxValidBall() >= other.ball) {
         this.ball = other.ball
       } else {
         this.ball = Ball.Poke
       }
-      this.metLevel = other.metLevel
+      this.metLevel = isGameBoyOrigin && !other.metLevel ? this.getLevel() : other.metLevel
       this.encounterType = other.encounterType ?? 0
-      this.country = other.country ?? 0
-      this.region = other.region ?? 0
-      this.consoleRegion = other.consoleRegion
-      this.language = other.language
+      this.country = isGameBoyOrigin ? DEFAULT_3DS_GEOLOCATION.country : other.country ?? 0
+      this.region = isGameBoyOrigin ? DEFAULT_3DS_GEOLOCATION.region : other.region ?? 0
+      this.consoleRegion = isGameBoyOrigin ? DEFAULT_3DS_CONSOLE_REGION : other.consoleRegion
+      this.language = validGen4Language(other.language) ? other.language : Language.English
       this.statusCondition = 0
       this.currentHP = other.currentHP ?? 0
       this.isFatefulEncounter = other.isFatefulEncounter

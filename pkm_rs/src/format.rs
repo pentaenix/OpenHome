@@ -303,7 +303,7 @@ impl PkmFormat {
         }
 
         if self == Self::PK4 && legalized_origin.generation() == Generation::G3 {
-            // Gen 3 Pokémon transferred through Gen 4 must be obtained through the pal park
+            // Gen 1-3 Pokémon represented in Gen 4 must be obtained through Pal Park.
             return super::location::PAL_PARK_GEN_4;
         }
 

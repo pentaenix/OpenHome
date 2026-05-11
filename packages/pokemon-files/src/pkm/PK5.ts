@@ -1,9 +1,11 @@
 import { Gen4Ribbons } from '@pokemon-resources/index'
 
 import {
+  AbilityNumber,
   AbilityIndex,
   Ball,
   ConvertStrategy,
+  Gender,
   Generation,
   Item,
   Language,
@@ -11,6 +13,7 @@ import {
   Lookup,
   MetadataSummaryLookup,
   NatureIndex,
+  OriginGame,
   OriginGames,
   SpeciesLookup,
 } from '@pkm-rs/pkg'
@@ -20,11 +23,32 @@ import * as byteLogic from '../util/byteLogic'
 import * as encryption from '../util/encryption'
 import { FourMoves } from '../util/pkmInterface'
 import { filterRibbons } from '../util/ribbonLogic'
+import {
+  currentPkmDate,
+  normalizeGbOriginTransferEvs,
+  normalizeGen4Evs,
+  validGen4Language,
+  validPkmDate,
+} from '../util/gen4Projection'
 import { getStats } from '../util/statCalc'
 import * as stringLogic from '../util/stringConversion'
 import * as types from '../util/types'
 import { generatePersonalityValuePreservingAttributes, MoveFilter } from '../util/util'
 import { PkmConstructorOptions } from './PKM'
+
+function legalGen5OriginForGameBoy(origin: OriginGame): OriginGame {
+  switch (origin) {
+    case OriginGame.BlueJpn:
+      return OriginGame.LeafGreen
+    case OriginGame.Gold:
+    case OriginGame.Crystal:
+      return OriginGame.HeartGold
+    case OriginGame.Silver:
+      return OriginGame.SoulSilver
+    default:
+      return OriginGame.FireRed
+  }
+}
 
 export default class PK5 {
   static getFormat() {
@@ -169,24 +193,28 @@ export default class PK5 {
       const other = arg
       const metData = converter.metData(other)
 
-      this.personalityValue = this.personalityValue =
-        other.personalityValue ?? generatePersonalityValuePreservingAttributes(other)
+      const isGameBoyOrigin = OriginGames.generation(other.gameOfOrigin) <= Generation.G2
+      this.personalityValue =
+        (isGameBoyOrigin ? generatePersonalityValuePreservingAttributes(other) : undefined) ??
+        other.personalityValue ??
+        generatePersonalityValuePreservingAttributes(other)
       this.dexNum = other.dexNum
       this.heldItemIndex = other.heldItemIndex
       this.trainerID = other.trainerID
       this.secretID = other.secretID
       this.exp = other.exp
       this.trainerFriendship = other.trainerFriendship
-      const isGameBoyOrigin = OriginGames.generation(other.gameOfOrigin) <= Generation.G2
       const formNum = other.formNum
-      const abilityNum = isGameBoyOrigin ? other.abilityNumFromPidGen34() : other.abilityNum ?? 0
+      const pidAbilityNum =
+        this.personalityValue % 2 === 1 ? AbilityNumber.Second : AbilityNumber.First
+      const abilityNum = isGameBoyOrigin ? pidAbilityNum : other.abilityNum ?? 0
       this.ability =
         (isGameBoyOrigin
           ? MetadataSummaryLookup(this.dexNum, formNum)?.abilityByNum(abilityNum)
           : other.ability) ?? MetadataSummaryLookup(this.dexNum, formNum)?.abilityByNum(abilityNum)
       this.markings = types.markingsSixShapesNoColorFromOther(other.markings)
-      this.language = other.language
-      this.evs = other.evs
+      this.language = validGen4Language(other.language) ? other.language : Language.English
+      this.evs = isGameBoyOrigin ? normalizeGbOriginTransferEvs(other.evs) : normalizeGen4Evs(other.evs)
       this.contest = other.contest
 
       const moveFilter = MoveFilter.fromPkmClass(PK5)
@@ -195,17 +223,18 @@ export default class PK5 {
       this.movePPUps = moveFilter.movePpUps(other)
 
       this.ivs = converter.ivs(other)
-      this.isEgg = other.isEgg
-      this.gender = other.gender
+      this.isEgg = isGameBoyOrigin ? false : other.isEgg
+      this.gender =
+        other.gender ?? this.metadata?.genderFromPid(this.personalityValue) ?? Gender.Genderless
       this.formNum = formNum
       this.nature = other.nature
       this.isNsPokemon = other.isNsPokemon ?? false
-      this.eggDate = other.eggDate
-      this.metDate = other.metDate
-      this.eggLocationIndex = other.eggLocationIndex ?? 0
+      this.eggDate = isGameBoyOrigin ? undefined : other.eggDate
+      this.metDate = validPkmDate(other.metDate) ? other.metDate : currentPkmDate()
+      this.eggLocationIndex = isGameBoyOrigin ? 0 : other.eggLocationIndex ?? 0
 
-      this.gameOfOrigin = metData.gameOfOrigin
-      this.metLocationIndex = metData.locationIndex
+      this.gameOfOrigin = isGameBoyOrigin ? legalGen5OriginForGameBoy(other.gameOfOrigin) : metData.gameOfOrigin
+      this.metLocationIndex = isGameBoyOrigin ? 30001 : metData.locationIndex
       this.pokerusByte = other.pokerusByte
       if (other.ball && PK5.maxValidBall() >= other.ball) {
         this.ball = other.ball
@@ -213,7 +242,7 @@ export default class PK5 {
         this.ball = Ball.Poke
       }
 
-      this.metLevel = other.metLevel
+      this.metLevel = isGameBoyOrigin && !other.metLevel ? this.getLevel() : other.metLevel
       this.encounterType = other.encounterType ?? 0
       this.pokeStarFame = other.pokeStarFame ?? 0
       this.statusCondition = 0
