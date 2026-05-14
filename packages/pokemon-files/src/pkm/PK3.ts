@@ -33,7 +33,7 @@ import {
   getGen3MiscFlags,
   MoveFilter,
 } from '../util/util'
-import { normalizeGbOriginTransferEvs, validGen4Language } from '../util/gen4Projection'
+import { generateSyntheticGbOriginSid, normalizeGbOriginTransferEvs, validGen4Language } from '../util/gen4Projection'
 import { PkmConstructorOptions } from './PKM'
 
 export default class PK3 {
@@ -155,11 +155,14 @@ export default class PK3 {
       const converter = new PkmConverter(this.format, options.strategy)
       const other = arg
       const metData = converter.metData(other)
+      const sourceGeneration = OriginGames.generation(other.gameOfOrigin)
 
       this.personalityValue =
         other.personalityValue ?? generatePersonalityValuePreservingAttributes(other)
       this.trainerID = other.trainerID
-      this.secretID = other.secretID
+      this.secretID = sourceGeneration <= Generation.G2 && !other.secretID
+        ? generateSyntheticGbOriginSid(other.dexNum, other.trainerID, this.personalityValue, other.gameOfOrigin, 1)
+        : other.secretID
       this.language = validGen4Language(other.language) ? other.language : Language.English
       this.markings = types.markingsFourShapesFromOther(other.markings)
       this.dexNum = other.dexNum
@@ -172,7 +175,6 @@ export default class PK3 {
       this.movePP = moveFilter.movePp(other, this.format)
       this.movePPUps = moveFilter.movePpUps(other)
 
-      const sourceGeneration = OriginGames.generation(other.gameOfOrigin)
       const projectedEvs = other.evs ?? {
         hp: 0,
         atk: 0,

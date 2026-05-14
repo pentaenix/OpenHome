@@ -405,11 +405,15 @@ describe('OHPKM conversion strategies', () => {
     )
     const ohpkm = new OHPKM(hoohPk2)
     ohpkm.language = Language.None
+    ohpkm.secretID = 0
     ohpkm.evs = { hp: 120, atk: 120, def: 120, spa: 120, spd: 120, spe: 120 }
 
+    const pk3 = PK3.fromOhpkm(ohpkm, LEGALITY_STRATEGY)
     const pk4 = PK4.fromOhpkm(ohpkm, LEGALITY_STRATEGY)
     const evValues = Object.values(pk4.evs)
 
+    expect(pk3.secretID).not.toEqual(0)
+    expect(pk4.secretID).not.toEqual(0)
     expect(pk4.language).toEqual(Language.English)
     expect(evValues.every((value) => value <= 100)).toBe(true)
     expect(evValues.reduce((sum, value) => sum + value, 0)).toBeLessThanOrEqual(510)
@@ -426,6 +430,7 @@ describe('OHPKM conversion strategies', () => {
     )
     const ohpkm = new OHPKM(hoohPk2)
     ohpkm.gameOfOrigin = OriginGame.Gold
+    ohpkm.secretID = 0
 
     const pk5 = PK5.fromOhpkm(ohpkm, LEGALITY_STRATEGY)
     const expectedPk5AbilityNum =
@@ -435,6 +440,7 @@ describe('OHPKM conversion strategies', () => {
     expect(pk5.metLevel).toBeGreaterThan(0)
     expect(pk5.isEgg).toBe(false)
     expect(pk5.eggLocationIndex).toEqual(0)
+    expect(pk5.secretID).not.toEqual(0)
     expect(pk5.metDate?.year).toBeGreaterThanOrEqual(2000)
     expect(pk5.metDate?.month).toBeGreaterThanOrEqual(1)
     expect(pk5.metDate?.day).toBeGreaterThanOrEqual(1)
@@ -451,6 +457,7 @@ describe('OHPKM conversion strategies', () => {
     expect(pk6.consoleRegion).toEqual(1)
     expect(pk6.isEgg).toBe(false)
     expect(pk6.eggLocationIndex).toEqual(0)
+    expect(pk6.secretID).not.toEqual(0)
     expect(pk6.metDate?.year).toBeGreaterThanOrEqual(2000)
     expect(pk6.ability?.index).toEqual(pk6.metadata?.abilityByNumGen3(expectedPk6AbilityNum)?.index)
 

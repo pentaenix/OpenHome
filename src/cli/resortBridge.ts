@@ -258,10 +258,13 @@ async function loadContext(storageRoot: string): Promise<BridgeContext> {
   }
 }
 
-async function writeContext(ctx: BridgeContext) {
+async function writeContext(ctx: BridgeContext, dirtyOpenhomeIds?: Iterable<string>) {
   const monsDir = path.join(ctx.storageRoot, 'mons_v2')
   await fs.mkdir(monsDir, { recursive: true })
-  for (const ohpkm of Object.values(ctx.store)) {
+  const mons = dirtyOpenhomeIds
+    ? Array.from(new Set(dirtyOpenhomeIds)).map((id) => ctx.store[id]).filter((mon): mon is OHPKM => !!mon)
+    : Object.values(ctx.store)
+  for (const ohpkm of mons) {
     await fs.writeFile(path.join(monsDir, `${ohpkm.openhomeId}.ohpkm`), bytesFromArrayBuffer(ohpkm.toBytes()))
   }
   await writeJson(path.join(ctx.storageRoot, 'gen12_lookup.json'), ctx.gen12)
@@ -269,7 +272,12 @@ async function writeContext(ctx: BridgeContext) {
   await writeJson(path.join(ctx.storageRoot, 'banks.json'), ctx.banks)
 }
 
+let activeSaveIoCounters: { saveLoads: number; saveWrites: number } | null = null
+
 async function loadSave(savePath: string, explicitSaveType?: string): Promise<SAV> {
+  if (activeSaveIoCounters) {
+    activeSaveIoCounters.saveLoads += 1
+  }
   const bytes = new Uint8Array(await fs.readFile(savePath))
   const candidates = explicitSaveType
     ? SAVE_TYPES.filter((saveType) => saveType.saveTypeID === explicitSaveType || saveType.saveTypeName === explicitSaveType)
@@ -285,6 +293,9 @@ async function loadSave(savePath: string, explicitSaveType?: string): Promise<SA
 }
 
 async function writeSave(writer: SaveWriter) {
+  if (activeSaveIoCounters) {
+    activeSaveIoCounters.saveWrites += 1
+  }
   await fs.writeFile(writer.filepath, writer.bytes)
 }
 
@@ -353,6 +364,25 @@ function syncOpenSave(ctx: BridgeContext, save: SAV): string[] {
   return synced
 }
 
+/// Sync only PC slots we are about to mutate (pull/push/batch). Avoids O(entire PC) work on large saves.
+function syncOpenSaveSlots(ctx: BridgeContext, save: SAV, slots: { box: number; slot: number }[]): string[] {
+  const synced: string[] = []
+  const seen = new Set<string>()
+  for (const { box, slot } of slots) {
+    const key = `${box},${slot}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    const mon = save.getMonAt(box, slot)
+    if (!mon) continue
+    const tracked = loadIfTracked(ctx, mon)
+    if (!tracked) continue
+    tracked.syncWithGameData(mon, save)
+    ctx.store[tracked.openhomeId] = tracked
+    synced.push(tracked.openhomeId)
+  }
+  return synced
+}
+
 function startTrackingNewMon(ctx: BridgeContext, mon: PKMInterface, sourceSave: SAV, destSave?: SAV): OHPKM {
   const ohpkm = OHPKM.fromMonInSave(mon, sourceSave)
   ohpkm.startedTrackingTimestamp = dayjs()
@@ -364,20 +394,91 @@ function startTrackingNewMon(ctx: BridgeContext, mon: PKMInterface, sourceSave: 
 function convertForSave(ctx: BridgeContext, ohpkm: OHPKM, save: SAV): PKMInterface {
   handleLookupsUpdate(ctx, ohpkm, save)
   ctx.store[ohpkm.openhomeId] = ohpkm
-  return save.convertOhpkm(ohpkm, RESORT_CONVERT_STRATEGY)
+  try {
+    return save.convertOhpkm(ohpkm, RESORT_CONVERT_STRATEGY)
+  } catch (error) {
+    if (
+      ohpkm.formNum !== 0 &&
+      error instanceof Error &&
+      error.message.includes('Invalid form index') &&
+      save.supportsMon(ohpkm.dexNum, 0, undefined)
+    ) {
+      const originalForm = ohpkm.formNum
+      const originalExtraForm = ohpkm.extraFormIndex
+      const mutableOhpkm = ohpkm as OHPKM & { formNum: number; extraFormIndex?: unknown }
+      mutableOhpkm.formNum = 0
+      mutableOhpkm.extraFormIndex = undefined
+      try {
+        return save.convertOhpkm(ohpkm, RESORT_CONVERT_STRATEGY)
+      } finally {
+        mutableOhpkm.formNum = originalForm
+        mutableOhpkm.extraFormIndex = originalExtraForm
+      }
+    }
+    throw error
+  }
 }
 
 function prepareTrackedMonsForSave(ctx: BridgeContext, save: SAV) {
-  for (let box = 0; box < save.getBoxCount(); box++) {
-    for (let slot = 0; slot < save.boxSlotCount; slot++) {
-      const mon = save.getMonAt(box, slot)
-      if (!mon) continue
-      const tracked = loadIfTracked(ctx, mon)
-      if (!tracked) continue
-      tracked.tradeToSave(save)
-      save.setMonAt(box, slot, save.convertOhpkm(tracked, RESORT_CONVERT_STRATEGY))
-      ctx.store[tracked.openhomeId] = tracked
+  if (save.updatedBoxSlots.length === 0) {
+    for (let box = 0; box < save.getBoxCount(); box++) {
+      for (let slot = 0; slot < save.boxSlotCount; slot++) {
+        const mon = save.getMonAt(box, slot)
+        if (!mon) continue
+        const tracked = loadIfTracked(ctx, mon)
+        if (!tracked) continue
+        tracked.tradeToSave(save)
+        save.setMonAt(box, slot, save.convertOhpkm(tracked, RESORT_CONVERT_STRATEGY))
+        ctx.store[tracked.openhomeId] = tracked
+      }
     }
+    return
+  }
+  const seen = new Set<string>()
+  for (const coord of save.updatedBoxSlots) {
+    const slotKey = `${coord.box},${coord.boxSlot}`
+    if (seen.has(slotKey)) continue
+    seen.add(slotKey)
+    const mon = save.getMonAt(coord.box, coord.boxSlot)
+    if (!mon) continue
+    const tracked = loadIfTracked(ctx, mon)
+    if (!tracked) continue
+    tracked.tradeToSave(save)
+    save.setMonAt(coord.box, coord.boxSlot, save.convertOhpkm(tracked, RESORT_CONVERT_STRATEGY))
+    ctx.store[tracked.openhomeId] = tracked
+  }
+}
+
+function openhomePerfEnabled(): boolean {
+  return process.env.PDSM_TRACE_OPENHOME_PERF === '1'
+}
+
+function openhomePerfLog(line: string) {
+  if (openhomePerfEnabled()) {
+    process.stderr.write(line + (line.endsWith('\n') ? '' : '\n'))
+  }
+}
+
+type BridgeCommandPerf = {
+  save_loads: number
+  save_writes: number
+  count: number
+  total_ms: number
+  load_context_ms: number
+  load_save_ms: number
+  parse_context_ms: number
+  sync_slots_ms: number
+  convert_apply_loop_ms: number
+  prepare_tracked_ms: number
+  write_save_ms: number
+  write_context_ms: number
+}
+
+function warnFakeBatch(perf: BridgeCommandPerf, command: string) {
+  if (perf.save_loads > 1 || perf.save_writes > 1) {
+    process.stderr.write(
+      `[openhome-perf-warning] fake batch detected command=${command} save_loads=${perf.save_loads} save_writes=${perf.save_writes}\n`
+    )
   }
 }
 
@@ -405,7 +506,7 @@ async function commandPullToHome() {
   const write = boolArg('write-save', true)
   const ctx = await loadContext(storageRoot)
   const save = await loadSave(savePath, arg('save-type', ''))
-  const synced = syncOpenSave(ctx, save)
+  const synced = syncOpenSaveSlots(ctx, save, [{ box, slot }])
   const mon = save.getMonAt(box, slot)
   if (!mon) throw new Error(`No Pokemon at save box ${box}, slot ${slot}`)
 
@@ -446,7 +547,7 @@ async function commandPushToGame() {
   const write = boolArg('write-save', true)
   const ctx = await loadContext(storageRoot)
   const save = await loadSave(savePath, arg('save-type', ''))
-  const synced = syncOpenSave(ctx, save)
+  const synced = syncOpenSaveSlots(ctx, save, [{ box, slot }])
   const ohpkm = ctx.store[openhomeId]
   if (!ohpkm) throw new Error(`Unknown OpenHome ID ${openhomeId}`)
 
@@ -485,6 +586,283 @@ async function commandPushToGame() {
     sourceHomeLocation: sourceHomeLocation ?? null,
     targetLocation: { box, slot },
   })
+}
+
+type BatchPullOp = {
+  box: number
+  slot: number
+  homeBank?: number
+  homeBox?: number
+  homeSlot?: number
+}
+
+type BatchPushOp = {
+  openhomeId: string
+  box: number
+  slot: number
+}
+
+function parseBatchOps<T>(name = 'ops-json'): T[] {
+  const raw = JSON.parse(arg(name, '[]')) as unknown
+  if (!Array.isArray(raw)) throw new Error(`--${name} must be an array`)
+  return raw as T[]
+}
+
+function firstEmptyHomeSlot(banks: OpenHomeBanks): OpenHomeHomeSlotLike {
+  for (const [bankIndex, bank] of banks.banks.entries()) {
+    for (const [boxIndex, box] of bank.boxes.entries()) {
+      for (let slot = 0; slot < 30; slot++) {
+        if (!box.identifiers[String(slot)]) return { bank: bank.index ?? bankIndex, box: box.index ?? boxIndex, slot }
+      }
+    }
+  }
+  const bank = 0
+  const box = 0
+  const slot = 0
+  ensureHomeSlot(banks, bank, box)
+  return { bank, box, slot }
+}
+
+type OpenHomeHomeSlotLike = { bank: number; box: number; slot: number }
+
+async function commandBatchPullToHome() {
+  const tCommand = Date.now()
+  activeSaveIoCounters = { saveLoads: 0, saveWrites: 0 }
+  try {
+    const storageRoot = arg('storage-root')
+    const savePath = arg('save')
+    const write = boolArg('write-save', true)
+    const ops = parseBatchOps<BatchPullOp>()
+    openhomePerfLog(`[openhome-perf] command=batch-pull-to-home count=${ops.length}`)
+
+    const t0 = Date.now()
+    const ctx = await loadContext(storageRoot)
+    const loadContextMs = Date.now() - t0
+
+    const t1 = Date.now()
+    const save = await loadSave(savePath, arg('save-type', ''))
+    const loadSaveMs = Date.now() - t1
+
+    const syncSlots = ops
+      .map((op) => {
+        const box = optionalInt(op.box)
+        const slot = optionalInt(op.slot)
+        if (box === undefined || slot === undefined) return null
+        return { box, slot }
+      })
+      .filter((v): v is { box: number; slot: number } => v !== null)
+
+    const t2 = Date.now()
+    const synced = syncOpenSaveSlots(ctx, save, syncSlots)
+    const syncSlotsMs = Date.now() - t2
+
+    const dirty = new Set<string>(synced)
+    const results: JsonObject[] = []
+
+    const tLoop = Date.now()
+    for (const [index, op] of ops.entries()) {
+      const tMon = Date.now()
+      const box = optionalInt(op.box)
+      const slot = optionalInt(op.slot)
+      if (box === undefined || slot === undefined) throw new Error(`batch pull op ${index} missing box/slot`)
+      const mon = save.getMonAt(box, slot)
+      if (!mon) throw new Error(`No Pokemon at save box ${box}, slot ${slot}`)
+
+      const destination =
+        op.homeBank !== undefined && op.homeBox !== undefined && op.homeSlot !== undefined
+          ? { bank: op.homeBank, box: op.homeBox, slot: op.homeSlot }
+          : firstEmptyHomeSlot(ctx.banks)
+      const displacedHomeId = ensureHomeSlot(ctx.banks, destination.bank, destination.box).identifiers[String(destination.slot)]
+      const ohpkm = loadIfTracked(ctx, mon) ?? startTrackingNewMon(ctx, mon, save)
+      dirty.add(ohpkm.openhomeId)
+      placeHome(ctx.banks, ohpkm.openhomeId, destination.bank, destination.box, destination.slot)
+
+      if (displacedHomeId) {
+        const displaced = ctx.store[displacedHomeId]
+        if (!displaced) throw new Error(`Home slot referenced missing OHPKM ${displacedHomeId}`)
+        save.setMonAt(box, slot, convertForSave(ctx, displaced, save))
+        dirty.add(displaced.openhomeId)
+      } else {
+        save.setMonAt(box, slot, undefined)
+      }
+      save.updatedBoxSlots.push({ box, boxSlot: slot })
+      results.push({
+        index,
+        openhomeId: ohpkm.openhomeId,
+        ohpkmBase64: base64(bytesFromArrayBuffer(ohpkm.toBytes())),
+        displacedHomeOpenhomeId: displacedHomeId ?? null,
+        homeLocation: destination,
+        sourceLocation: { box, slot },
+      })
+      if (openhomePerfEnabled()) {
+        const dex = 'dexNum' in mon ? (mon as { dexNum: number }).dexNum : -1
+        openhomePerfLog(`[openhome-perf] per_mon_convert_ms species=${dex} ms=${Date.now() - tMon}`)
+      }
+    }
+    const convertApplyLoopMs = Date.now() - tLoop
+
+    let prepareTrackedMs = 0
+    let writeSaveMs = 0
+    if (write) {
+      const tp = Date.now()
+      prepareTrackedMonsForSave(ctx, save)
+      prepareTrackedMs = Date.now() - tp
+      const tw = Date.now()
+      await writeSave(save.prepareWriter())
+      writeSaveMs = Date.now() - tw
+    }
+
+    const twc = Date.now()
+    await writeContext(ctx, dirty)
+    const writeContextMs = Date.now() - twc
+
+    const totalMs = Date.now() - tCommand
+    const perf: BridgeCommandPerf = {
+      save_loads: activeSaveIoCounters.saveLoads,
+      save_writes: activeSaveIoCounters.saveWrites,
+      count: ops.length,
+      total_ms: totalMs,
+      load_context_ms: loadContextMs,
+      load_save_ms: loadSaveMs,
+      parse_context_ms: 0,
+      sync_slots_ms: syncSlotsMs,
+      convert_apply_loop_ms: convertApplyLoopMs,
+      prepare_tracked_ms: prepareTrackedMs,
+      write_save_ms: writeSaveMs,
+      write_context_ms: writeContextMs,
+    }
+    warnFakeBatch(perf, 'batch-pull-to-home')
+    if (openhomePerfEnabled()) {
+      openhomePerfLog(
+        `[openhome-perf] load_save_ms=${loadSaveMs} sync_slots_ms=${syncSlotsMs} convert_all_ms=${convertApplyLoopMs} prepare_tracked_ms=${prepareTrackedMs} write_save_ms=${writeSaveMs} write_context_ms=${writeContextMs} total_ms=${totalMs} save_loads=${perf.save_loads} save_writes=${perf.save_writes}`
+      )
+    }
+    jsonOk({ operation: 'batch-pull-to-home', results, syncedOpenhomeIds: synced, sourceSaveWritten: write, perf })
+  } finally {
+    activeSaveIoCounters = null
+  }
+}
+
+async function commandBatchPushToGame() {
+  const tCommand = Date.now()
+  activeSaveIoCounters = { saveLoads: 0, saveWrites: 0 }
+  try {
+    const storageRoot = arg('storage-root')
+    const savePath = arg('save')
+    const write = boolArg('write-save', true)
+    const ops = parseBatchOps<BatchPushOp>()
+    openhomePerfLog(`[openhome-perf] command=batch-push-to-game count=${ops.length}`)
+
+    const t0 = Date.now()
+    const ctx = await loadContext(storageRoot)
+    const loadContextMs = Date.now() - t0
+
+    const t1 = Date.now()
+    const save = await loadSave(savePath, arg('save-type', ''))
+    const loadSaveMs = Date.now() - t1
+
+    const syncSlots = ops
+      .map((op) => {
+        const box = optionalInt(op.box)
+        const slot = optionalInt(op.slot)
+        if (box === undefined || slot === undefined) return null
+        return { box, slot }
+      })
+      .filter((v): v is { box: number; slot: number } => v !== null)
+
+    const t2 = Date.now()
+    const synced = syncOpenSaveSlots(ctx, save, syncSlots)
+    const syncSlotsMs = Date.now() - t2
+
+    const dirty = new Set<string>(synced)
+    const results: JsonObject[] = []
+
+    const tLoop = Date.now()
+    for (const [index, op] of ops.entries()) {
+      const tMon = Date.now()
+      const box = optionalInt(op.box)
+      const slot = optionalInt(op.slot)
+      const openhomeId = String(op.openhomeId ?? '')
+      if (!openhomeId || box === undefined || slot === undefined) throw new Error(`batch push op ${index} missing openhomeId/box/slot`)
+      const ohpkm = ctx.store[openhomeId]
+      if (!ohpkm) throw new Error(`Unknown OpenHome ID ${openhomeId}`)
+
+      const sourceHomeLocation = findHomeLocation(ctx.banks, openhomeId)
+      const displaced = save.getMonAt(box, slot)
+      ohpkm.tradeToSave(save)
+      save.setMonAt(box, slot, convertForSave(ctx, ohpkm, save))
+      dirty.add(openhomeId)
+      save.updatedBoxSlots.push({ box, boxSlot: slot })
+
+      if (sourceHomeLocation) {
+        if (displaced) {
+          const displacedOhpkm = loadIfTracked(ctx, displaced) ?? startTrackingNewMon(ctx, displaced, save)
+          dirty.add(displacedOhpkm.openhomeId)
+          placeHome(
+            ctx.banks,
+            displacedOhpkm.openhomeId,
+            sourceHomeLocation.bank,
+            sourceHomeLocation.box,
+            sourceHomeLocation.slot
+          )
+        } else {
+          removeHomePlacement(ctx.banks, openhomeId)
+        }
+      }
+
+      results.push({
+        index,
+        openhomeId,
+        ohpkmBase64: base64(bytesFromArrayBuffer(ohpkm.toBytes())),
+        sourceHomeLocation: sourceHomeLocation ?? null,
+        targetLocation: { box, slot },
+      })
+      if (openhomePerfEnabled()) {
+        openhomePerfLog(`[openhome-perf] per_mon_convert_ms species=${ohpkm.dexNum} ms=${Date.now() - tMon}`)
+      }
+    }
+    const convertApplyLoopMs = Date.now() - tLoop
+
+    let prepareTrackedMs = 0
+    let writeSaveMs = 0
+    if (write) {
+      const tp = Date.now()
+      prepareTrackedMonsForSave(ctx, save)
+      prepareTrackedMs = Date.now() - tp
+      const tw = Date.now()
+      await writeSave(save.prepareWriter())
+      writeSaveMs = Date.now() - tw
+    }
+
+    const twc = Date.now()
+    await writeContext(ctx, dirty)
+    const writeContextMs = Date.now() - twc
+
+    const totalMs = Date.now() - tCommand
+    const perf: BridgeCommandPerf = {
+      save_loads: activeSaveIoCounters.saveLoads,
+      save_writes: activeSaveIoCounters.saveWrites,
+      count: ops.length,
+      total_ms: totalMs,
+      load_context_ms: loadContextMs,
+      load_save_ms: loadSaveMs,
+      parse_context_ms: 0,
+      sync_slots_ms: syncSlotsMs,
+      convert_apply_loop_ms: convertApplyLoopMs,
+      prepare_tracked_ms: prepareTrackedMs,
+      write_save_ms: writeSaveMs,
+      write_context_ms: writeContextMs,
+    }
+    warnFakeBatch(perf, 'batch-push-to-game')
+    if (openhomePerfEnabled()) {
+      openhomePerfLog(
+        `[openhome-perf] load_save_ms=${loadSaveMs} sync_slots_ms=${syncSlotsMs} convert_all_ms=${convertApplyLoopMs} prepare_tracked_ms=${prepareTrackedMs} write_save_ms=${writeSaveMs} write_context_ms=${writeContextMs} total_ms=${totalMs} save_loads=${perf.save_loads} save_writes=${perf.save_writes}`
+      )
+    }
+    jsonOk({ operation: 'batch-push-to-game', results, syncedOpenhomeIds: synced, targetSaveWritten: write, perf })
+  } finally {
+    activeSaveIoCounters = null
+  }
 }
 
 async function commandSyncSave() {
@@ -541,6 +919,12 @@ async function main() {
       break
     case 'push-to-game':
       await commandPushToGame()
+      break
+    case 'batch-pull-to-home':
+      await commandBatchPullToHome()
+      break
+    case 'batch-push-to-game':
+      await commandBatchPushToGame()
       break
     case 'supports-mons':
       await commandSupportsMons()

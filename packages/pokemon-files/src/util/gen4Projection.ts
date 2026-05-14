@@ -60,3 +60,24 @@ export function normalizeGen4Evs(stats: Stats): Stats {
 export function normalizeGbOriginTransferEvs(stats: Stats): Stats {
   return normalizeCappedEvs(stats, 100)
 }
+
+export function generateSyntheticGbOriginSid(
+  species: number,
+  trainerId: number,
+  personalityValue: number | undefined,
+  originGame: number,
+  sourceFormat: number
+): number {
+  let seed =
+    (((species & 0xffff) << 16) ^
+      ((trainerId & 0xffff) << 1) ^
+      ((personalityValue ?? 0) & 0xffff) ^
+      ((originGame & 0xff) << 24) ^
+      ((sourceFormat & 0xff) << 8) ^
+      0x5a17) >>>
+    0
+  seed ^= seed >>> 16
+  seed = Math.imul(seed, 0x45d9f3b) + 0x2710
+  const sid = seed & 0xffff
+  return sid === 0 ? 1 : sid
+}

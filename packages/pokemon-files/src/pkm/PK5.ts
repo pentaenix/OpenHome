@@ -25,6 +25,7 @@ import { FourMoves } from '../util/pkmInterface'
 import { filterRibbons } from '../util/ribbonLogic'
 import {
   currentPkmDate,
+  generateSyntheticGbOriginSid,
   normalizeGbOriginTransferEvs,
   normalizeGen4Evs,
   validGen4Language,
@@ -201,7 +202,9 @@ export default class PK5 {
       this.dexNum = other.dexNum
       this.heldItemIndex = other.heldItemIndex
       this.trainerID = other.trainerID
-      this.secretID = other.secretID
+      this.secretID = isGameBoyOrigin && !other.secretID
+        ? generateSyntheticGbOriginSid(other.dexNum, other.trainerID, this.personalityValue, other.gameOfOrigin, 1)
+        : other.secretID
       this.exp = other.exp
       this.trainerFriendship = other.trainerFriendship
       const formNum = other.formNum
